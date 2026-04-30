@@ -1,0 +1,26 @@
+name: Feature request
+description: Suggest an addition to mneo
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What can't you do today? Concrete scenario, not abstract.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed shape
+      description: API, command, or behavior. Optional.
+
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope check
+      description: mneo's design boundaries — see "Why git refs instead of a vector database?" in the README.
+      options:
+        - label: This isn't asking for search, embeddings, schemas, tags, or importance levels.
+          required: true

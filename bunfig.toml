@@ -1,0 +1,13 @@
+# Bun runtime configuration
+# https://bun.sh/docs/runtime/bunfig
+
+[install]
+# Use exact versions in package.json — no semver range drift
+exact = true
+
+# Treat peer deps as strict (fail on conflicts)
+peer = true
+
+[run]
+# Preserve stdout colors in scripts
+bun = true

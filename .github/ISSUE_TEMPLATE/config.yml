@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/HugoLopes45/mneo/security/advisories/new
+    about: Report privately. Do not file a public issue for vulnerabilities.
