@@ -65,7 +65,7 @@ describe("context() porcelain", () => {
   describe("budget", () => {
     test("budget=0 → text empty (even the shortest entry doesn't fit)", () => {
       record({ repo: fixture.repo, body: "x", slug: "a", scope: "main" });
-      expect(context({ repo: fixture.repo, budget: 0 }).text).toBe("");
+      expect(context({ repo: fixture.repo, charBudget: 0 }).text).toBe("");
     });
 
     test("multi-line body: full rendering is bullet + indented continuation lines", () => {
@@ -75,7 +75,7 @@ describe("context() porcelain", () => {
         slug: "auth/oauth",
         scope: "main",
       });
-      const r = context({ repo: fixture.repo, budget: 1000 });
+      const r = context({ repo: fixture.repo, charBudget: 1000 });
       expect(r.text).toBe(
         [
           "- [main] auth/oauth — use OAuth2 with PKCE",
@@ -87,13 +87,13 @@ describe("context() porcelain", () => {
 
     test("single-line body: full rendering identical to short (slice-1 compat)", () => {
       record({ repo: fixture.repo, body: "argon2id", slug: "x", scope: "main" });
-      const r = context({ repo: fixture.repo, budget: 10000 });
+      const r = context({ repo: fixture.repo, charBudget: 10000 });
       expect(r.text).toBe("- [main] x — argon2id");
     });
 
     test("body trailing newline: collapsed, no empty indented line", () => {
       record({ repo: fixture.repo, body: "title\nbody line\n", slug: "t", scope: "main" });
-      const r = context({ repo: fixture.repo, budget: 1000 });
+      const r = context({ repo: fixture.repo, charBudget: 1000 });
       expect(r.text).toBe(["- [main] t — title", "  body line"].join("\n"));
     });
 
@@ -129,7 +129,7 @@ describe("context() porcelain", () => {
       // Joins: 2 newlines = 2 chars. Total = 33+24+16+2 = 75.
       // a full = "- [main] a — old\n  long body line one"      = 37, would push to 96.
       // Budget 80 → fits c full + b full + a short.
-      const r = context({ repo: fixture.repo, budget: 80 });
+      const r = context({ repo: fixture.repo, charBudget: 80 });
       const lines = r.text.split("\n");
       // c full rendering
       expect(lines[0]).toBe("- [main] c — new");
@@ -146,10 +146,18 @@ describe("context() porcelain", () => {
     test("note larger than entire budget → short form, never truncates body mid-line", () => {
       const big = `headline\n${"x".repeat(4500)}`; // under MAX_BODY 5000
       record({ repo: fixture.repo, body: big, slug: "big", scope: "main" });
-      const r = context({ repo: fixture.repo, budget: 200 });
+      const r = context({ repo: fixture.repo, charBudget: 200 });
       expect(r.text).toBe("- [main] big — headline");
       // No body chars leaked into the bundle.
       expect(r.text).not.toMatch(/x{10}/);
+    });
+
+    test("ContextOpts.budget is rejected by the typechecker (Slice 4 rename guard)", () => {
+      // @ts-expect-error — Slice 4 renamed `budget` → `charBudget`. The old
+      // key would silently accept a token-count from the LLM and overshoot
+      // the actual char-count budget on non-ASCII content.
+      const opts: import("../packages/git-memory/src/context.ts").ContextOpts = { budget: 100 };
+      expect(opts).toBeDefined();
     });
 
     test("default budget is DEFAULT_BUDGET (2000)", () => {

@@ -4,7 +4,7 @@
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { forget, list, read, record } from "git-memory";
+import { GitMemoryError, forget, list, read, record } from "git-memory";
 import { z } from "zod";
 
 /** MCP server name. */
@@ -18,6 +18,13 @@ function ok(data: unknown) {
 }
 
 function fail(err: unknown) {
+  // Typed SDK errors surface as JSON {code, message} so the LLM can route on
+  // `code` and read `message` as a recovery prompt. Untyped errors keep the
+  // plain-text shape — defensive fallback for anything we haven't classified.
+  if (err instanceof GitMemoryError) {
+    const text = JSON.stringify({ code: err.code, message: err.message });
+    return { isError: true, content: [{ type: "text" as const, text }] };
+  }
   const msg = err instanceof Error ? err.message : String(err);
   return { isError: true, content: [{ type: "text" as const, text: msg }] };
 }

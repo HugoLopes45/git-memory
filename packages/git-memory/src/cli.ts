@@ -33,7 +33,7 @@ if (sub === "context") {
     }
   }
   try {
-    emit(context({ budget }).text);
+    emit(context({ charBudget: budget }).text);
   } catch {
     // Never block the prompt, regardless of why context() failed (no repo,
     // no notes, git missing, ref corruption, ...). Coverage in tests/cli.test.ts.

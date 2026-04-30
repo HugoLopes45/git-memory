@@ -1,11 +1,11 @@
 /**
- * Build a token-budget-bounded bundle of recent notes for pre-prompt injection.
+ * Build a character-budget-bounded bundle of recent notes for pre-prompt injection.
  * Renders full bodies where they fit, falls back to headlines only when space is tight.
  */
 
-import { type ListEntry, type ListOpts, findRepo, list, read } from "./index.js";
+import { type ListEntry, type ListOpts, RepoBrokenError, findRepo, list, read } from "./index.js";
 
-/** Default token budget for the context bundle. */
+/** Default character budget for the context bundle. */
 export const DEFAULT_BUDGET = 2000;
 
 export interface ContextOpts {
@@ -13,8 +13,12 @@ export interface ContextOpts {
   scope?: ListOpts["scope"];
   limit?: number | undefined;
   maxAgeDays?: number | undefined;
-  /** Token budget. Defaults to DEFAULT_BUDGET. */
-  budget?: number | undefined;
+  /**
+   * Approximate character budget for the rendered bundle. Token count varies
+   * for non-ASCII content (CJK, emoji) — the LLM consumer should size with
+   * headroom. Defaults to DEFAULT_BUDGET.
+   */
+  charBudget?: number | undefined;
 }
 
 export interface ContextResult {
@@ -38,11 +42,22 @@ function renderFull(e: ListEntry, body: string): string {
   return `${renderShort(e)}\n${tail}`;
 }
 
-/** Build a token-bounded context bundle for pre-prompt injection. Returns empty string if no notes found. */
+/** Build a token-bounded context bundle for pre-prompt injection. Returns empty string if no notes found or the repo is unusable. */
 export function context(opts: ContextOpts = {}): ContextResult {
-  const repo = opts.repo ?? findRepo();
-  const { entries } = list({ ...opts, repo });
-  const budget = opts.budget ?? DEFAULT_BUDGET;
+  let repo: string;
+  let entries: ListEntry[];
+  try {
+    repo = opts.repo ?? findRepo();
+    entries = list({ ...opts, repo }).entries;
+  } catch (e) {
+    // Graceful degradation: no repo / corrupted refs / git missing → no
+    // bundle. Never block the prompt over a broken memory store. The CLI
+    // catches anything that escapes; SDK consumers calling context()
+    // directly get the same contract.
+    if (e instanceof RepoBrokenError) return { text: "" };
+    throw e;
+  }
+  const budget = opts.charBudget ?? DEFAULT_BUDGET;
 
   const parts: string[] = [];
   let used = 0;

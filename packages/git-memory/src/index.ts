@@ -11,11 +11,20 @@
  */
 
 export { context, type ContextOpts, type ContextResult } from "./context.js";
+export {
+  ConflictError,
+  GitMemoryError,
+  type GitMemoryErrorCode,
+  InvalidInputError,
+  NotFoundError,
+  RepoBrokenError,
+} from "./errors.js";
 
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { resolve } from "node:path";
+
+import { ConflictError, InvalidInputError, NotFoundError, RepoBrokenError } from "./errors.js";
 
 /** Root namespace for all memory refs. */
 export const REF_ROOT = "refs/agent-memory/";
@@ -94,34 +103,44 @@ function shTry(repo: string, args: readonly string[]): string | null {
   return r.status === 0 ? (r.stdout ?? "").toString().trim() : null;
 }
 
-/** Find the git repository root. Respects GIT_MEMORY_REPO env var. Throws if no repo found. */
+/** Find the git repository root. Respects GIT_MEMORY_REPO env var. Throws RepoBrokenError if no repo found. */
 export function findRepo(start: string = process.cwd()): string {
   const env = process.env.GIT_MEMORY_REPO;
   if (env) {
     const p = resolve(env);
-    if (!existsSync(`${p}/.git`) && !existsSync(`${p}/HEAD`)) {
-      throw new Error(`GIT_MEMORY_REPO points to non-repo: ${p}`);
+    // Delegate the repo check to git itself — `existsSync('${p}/HEAD')`
+    // false-accepts any directory containing a stray file named HEAD. git
+    // rev-parse --git-dir handles working trees, bare repos, and linked
+    // worktrees uniformly.
+    if (shTry(p, ["rev-parse", "--git-dir"]) === null) {
+      throw new RepoBrokenError(`GIT_MEMORY_REPO points to non-repo: ${p}`);
     }
     return p;
   }
-  // Walk up to the filesystem root by detecting the dirname() fixpoint —
-  // works on every platform. Comparing to "/" infinite-loops on Windows
-  // where the root is "C:\\" and dirname returns the same path.
-  let cur = resolve(start);
-  while (true) {
-    if (existsSync(`${cur}/.git`)) return cur;
-    const parent = dirname(cur);
-    if (parent === cur) break;
-    cur = parent;
-  }
-  throw new Error(`no git repo found from ${start}`);
+  // git's --show-toplevel handles walk-up internally and supports linked
+  // worktrees natively. Single spawn vs. one per parent dir.
+  const top = shTry(resolve(start), ["rev-parse", "--show-toplevel"]);
+  if (top) return top;
+  throw new RepoBrokenError(`no git repo found from ${start}`);
 }
 
 // Branch names like `feat/auth` get translated for use as a scope. Only
 // applied to auto-detected branches and GIT_MEMORY_SCOPE — never to user
 // input via the API, which is validated strictly.
-function branchToScope(branch: string): string {
-  return branch.replace(/\//g, "-").toLowerCase();
+//
+// Strict alphabet: lowercase + slash-replace, then validate against
+// SCOPE_RE. Branches with `_`, `.`, `~`, `@`, etc. (all valid git refnames)
+// throw InvalidInputError instead of producing a confusing "bad scope"
+// error far from the source. The recovery prompt names GIT_MEMORY_SCOPE so
+// the LLM has a path forward without needing to rename the branch.
+function branchToScope(input: string): string {
+  const normalized = input.replace(/\//g, "-").toLowerCase();
+  if (!normalized || normalized.length > MAX_SCOPE || !SCOPE_RE.test(normalized)) {
+    throw new InvalidInputError(
+      `bad scope: '${input}' cannot normalize to [a-z0-9-] (≤${MAX_SCOPE} chars); set GIT_MEMORY_SCOPE explicitly`,
+    );
+  }
+  return normalized;
 }
 
 /** Sentinel value to delete/list across all scopes. SCOPE_RE rejects "*" as a literal scope. */
@@ -142,16 +161,16 @@ export function currentScope(repo: string): string {
 
 function validateScope(scope: string) {
   if (!scope || scope.length > MAX_SCOPE || !SCOPE_RE.test(scope)) {
-    throw new Error(`bad scope: ${scope} (lowercase a-z0-9-, ≤${MAX_SCOPE} chars)`);
+    throw new InvalidInputError(`bad scope: ${scope} (lowercase a-z0-9-, ≤${MAX_SCOPE} chars)`);
   }
 }
 
 function validateSlug(slug: string) {
   if (!slug || slug.length > MAX_SLUG || !SLUG_RE.test(slug)) {
-    throw new Error(`bad slug: ${slug} (lowercase a-z0-9-/, ≤${MAX_SLUG} chars)`);
+    throw new InvalidInputError(`bad slug: ${slug} (lowercase a-z0-9-/, ≤${MAX_SLUG} chars)`);
   }
   if (slug.includes("//") || slug.endsWith("/")) {
-    throw new Error(`bad slug: ${slug} (no // or trailing /)`);
+    throw new InvalidInputError(`bad slug: ${slug} (no // or trailing /)`);
   }
 }
 
@@ -192,7 +211,7 @@ export interface RecordOpts {
 const BY_RE = /^[^\r\n]+$/;
 function validateBy(by: string) {
   if (!by || by.length > 80 || !BY_RE.test(by)) {
-    throw new Error("bad by: must be a single line, 1-80 chars");
+    throw new InvalidInputError("bad by: must be a single line, 1-80 chars");
   }
 }
 
@@ -206,10 +225,10 @@ export interface RecordResult {
 /** Save a note. Slug defaults to sha1(body)[:12]. Throws on validation failure or lock exhaustion. */
 export function record(opts: RecordOpts): RecordResult {
   if (typeof opts.body !== "string" || opts.body.trim().length === 0) {
-    throw new Error("body must be a non-empty string");
+    throw new InvalidInputError("body must be a non-empty string");
   }
   if (opts.body.length > MAX_BODY) {
-    throw new Error(`body length ${opts.body.length} > ${MAX_BODY}`);
+    throw new InvalidInputError(`body length ${opts.body.length} > ${MAX_BODY}`);
   }
   if (opts.by !== undefined) validateBy(opts.by);
   const repo = opts.repo ?? findRepo();
@@ -254,7 +273,7 @@ export function record(opts: RecordOpts): RecordResult {
       sleepSync(1 + Math.floor(Math.random() * RETRY_JITTER_MAX_MS));
     }
   }
-  throw new Error(
+  throw new ConflictError(
     `record: ${scope}/${slug} contended after ${RECORD_MAX_RETRIES} retries — transient lock from concurrent writers; wait briefly and retry, or pass a different slug if you want a separate note`,
   );
 }
@@ -301,18 +320,26 @@ export function list(opts: ListOpts = {}): ListResult {
   const repo = opts.repo ?? findRepo();
   const prefix = opts.prefix ?? "";
   if (prefix && !/^[a-z0-9][a-z0-9\-/]*$/.test(prefix)) {
-    throw new Error(`bad prefix: ${prefix}`);
+    throw new InvalidInputError(`bad prefix: ${prefix}`);
   }
   const scopes = resolveScopes(repo, opts.scope);
 
   const refPatterns =
     scopes.length === 0 ? [REF_ROOT] : scopes.map((s) => `${REF_ROOT}${s}/${prefix}`);
-  const out = sh(repo, [
-    "for-each-ref",
-    "--sort=-creatordate",
-    "--format=%(refname)\t%(objectname)\t%(creatordate:unix)\t%(subject)",
-    ...refPatterns,
-  ]);
+  // for-each-ref can fail on corrupted refs (planted bad SHA, broken pack).
+  // Translate to RepoBrokenError so context() / CLI can degrade gracefully
+  // and the LLM gets a code, not a raw `git for-each-ref: ...` string.
+  let out: string;
+  try {
+    out = sh(repo, [
+      "for-each-ref",
+      "--sort=-creatordate",
+      "--format=%(refname)\t%(objectname)\t%(creatordate:unix)\t%(subject)",
+      ...refPatterns,
+    ]);
+  } catch (e) {
+    throw new RepoBrokenError(`list: ${e instanceof Error ? e.message : String(e)}`);
+  }
 
   // De-dup by slug across scopes: the first occurrence wins (current scope before trunk).
   const seen = new Set<string>();
@@ -363,9 +390,9 @@ export interface ReadResult {
   body: string;
 }
 
-/** Read a note's full body. Falls back to main scope if not found locally. Throws if not found anywhere. */
+/** Read a note's full body. Falls back to main scope if not found locally. Throws NotFoundError if missing. */
 export function read(opts: ReadOpts): ReadResult {
-  if (!opts.slug) throw new Error("slug required");
+  if (!opts.slug) throw new InvalidInputError("slug required");
   const repo = opts.repo ?? findRepo();
   if (opts.scope) validateScope(opts.scope);
   const explicit = opts.scope ? [opts.scope] : null;
@@ -380,10 +407,18 @@ export function read(opts: ReadOpts): ReadResult {
   for (const scope of tryScopes) {
     const ref = refOf(scope, opts.slug);
     if (!shTry(repo, ["rev-parse", "--verify", "--quiet", ref])) continue;
-    const body = sh(repo, ["show", `${ref}:note.md`]);
+    // Race window: a concurrent forget can delete the ref between rev-parse
+    // and show. Treat the failure as not-in-this-scope and let the fallback
+    // loop continue — never leak the raw `fatal: ...` string.
+    let body: string;
+    try {
+      body = sh(repo, ["show", `${ref}:note.md`]);
+    } catch {
+      continue;
+    }
     return { slug: opts.slug, scope, body };
   }
-  throw new Error(`note not found: ${opts.slug} (tried scopes: ${tryScopes.join(", ")})`);
+  throw new NotFoundError(`note not found: ${opts.slug} (tried scopes: ${tryScopes.join(", ")})`);
 }
 
 export interface ForgetOpts {
@@ -402,7 +437,7 @@ export interface ForgetResult {
 
 /** Delete a note from a scope or from all scopes (scope: ALL_SCOPES). Best-effort + idempotent. */
 export function forget(opts: ForgetOpts): ForgetResult {
-  if (!opts.slug) throw new Error("slug required");
+  if (!opts.slug) throw new InvalidInputError("slug required");
   validateSlug(opts.slug);
   const repo = opts.repo ?? findRepo();
 
@@ -412,7 +447,12 @@ export function forget(opts: ForgetOpts): ForgetResult {
     // deleted the ref between our rev-parse and update-ref) does NOT abort
     // the loop — re-running forget after a partial converges trivially,
     // since deleted refs no longer match the slug filter.
-    const out = sh(repo, ["for-each-ref", "--format=%(refname)", REF_ROOT]);
+    let out: string;
+    try {
+      out = sh(repo, ["for-each-ref", "--format=%(refname)", REF_ROOT]);
+    } catch (e) {
+      throw new RepoBrokenError(`forget: ${e instanceof Error ? e.message : String(e)}`);
+    }
     const scopes: string[] = [];
     for (const ref of out.split("\n").filter(Boolean)) {
       const tail = ref.slice(REF_ROOT.length);
@@ -440,6 +480,13 @@ export function forget(opts: ForgetOpts): ForgetResult {
   const ref = refOf(scope, opts.slug);
   const sha = shTry(repo, ["rev-parse", "--verify", "--quiet", ref]);
   if (!sha) return { deleted: false, scope };
-  sh(repo, ["update-ref", "-d", ref, sha]);
+  // Race window: the ref existed at rev-parse but a concurrent writer can
+  // delete or move it before update-ref lands. Stay idempotent — match the
+  // ALL_SCOPES path by treating the failure as "already gone".
+  try {
+    sh(repo, ["update-ref", "-d", ref, sha]);
+  } catch {
+    return { deleted: false, scope };
+  }
   return { deleted: true, scope };
 }

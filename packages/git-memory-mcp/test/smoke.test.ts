@@ -103,6 +103,20 @@ describe("git-memory-mcp", () => {
     });
   });
 
+  test("read on a missing slug surfaces a structured {code, message} payload", async () => {
+    await withClient(async (client) => {
+      const res = (await client.callTool({
+        name: "read",
+        arguments: { repo: fixture.repo, slug: "does-not-exist", scope: "main" },
+      })) as CallToolResult;
+      expect(res.isError).toBe(true);
+      const text = res.content[0]?.text ?? "";
+      const payload = JSON.parse(text) as { code: string; message: string };
+      expect(payload.code).toBe("NOT_FOUND");
+      expect(payload.message).toMatch(/not found/);
+    });
+  });
+
   test("forget then read returns isError", async () => {
     await withClient(async (client) => {
       await client.callTool({

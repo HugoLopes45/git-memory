@@ -6,6 +6,8 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 
+import { InvalidInputError } from "./errors.js";
+
 export interface InitHookOpts {
   projectDir: string;
   hookCommand: string;
@@ -63,7 +65,18 @@ export function installHook(opts: InitHookOpts): InitHookResult {
 
   let settings: SettingsShape = {};
   if (existsSync(path)) {
-    settings = JSON.parse(readFileSync(path, "utf8")) as SettingsShape;
+    const raw = readFileSync(path, "utf8");
+    try {
+      settings = JSON.parse(raw) as SettingsShape;
+    } catch (e) {
+      // Pre-existing settings.json is malformed (interrupted write, manual
+      // edit, merge marker). Refuse to clobber it — surface the path so the
+      // user can back up + recreate. Plain JSON.parse error tells the LLM
+      // nothing actionable.
+      throw new InvalidInputError(
+        `${path} is not valid JSON: ${e instanceof Error ? e.message : String(e)}; back up and re-create or fix manually`,
+      );
+    }
   }
   settings.hooks ??= {};
   settings.hooks.SessionStart ??= [];

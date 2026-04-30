@@ -12,9 +12,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `CODE_OF_CONDUCT.md`, `SECURITY.md`, `CHANGELOG.md`.
 - Issue templates (bug, feature) and PR template.
 - npm metadata (`repository`, `homepage`, `bugs`, `keywords`) on published packages.
+- Typed error contract: `GitMemoryError` base class with `NotFoundError`, `InvalidInputError`, `RepoBrokenError`, `ConflictError` subclasses (each carries a stable `code`). MCP `fail()` now serializes typed errors as `{code, message}` JSON for LLM consumers.
 
 ### Changed
 - README rewritten for clarity and SEO surface (persistent memory, MCP server, vector-database counter-positioning).
+- `findRepo` now delegates to git itself (`rev-parse --git-dir` for the env path, `--show-toplevel` for walk-up) — non-repo directories with a stray `HEAD` file no longer false-accept.
+- `branchToScope` validates the normalized form against the scope alphabet and throws `InvalidInputError` with a recovery prompt when the branch can't auto-map (underscore, dot, `@`, etc.). The recovery message names `GIT_MEMORY_SCOPE` so the LLM has a path forward without renaming the branch.
+- `context()` now degrades gracefully on `RepoBrokenError`: returns `{ text: "" }` so SDK consumers get the same contract the CLI relied on, instead of an unguarded throw.
+- `forget` (single-scope) is now idempotent under race: if the ref is deleted between `rev-parse` and `update-ref -d`, returns `{ deleted: false }` instead of leaking a `git update-ref` error.
+
+### Breaking
+- `ContextOpts.budget` renamed to `charBudget`. The field measures characters (not tokens, despite the previous JSDoc); the rename makes the contract honest. The CLI flag `--budget` is unchanged for existing hook configs; it's translated at the boundary.
 
 ## [0.1.0] - 2026-04-30
 
