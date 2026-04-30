@@ -1,11 +1,6 @@
 #!/usr/bin/env node
-// CLI entry. Sub-commands:
-//   context [--budget N]  — emit hook payload (SessionStart)
-//   init-hook             — write/merge the hook entry into .claude/settings.json
-//
-// `context` is invoked by Claude Code's SessionStart hook on startup, resume,
-// clear, and compact. It MUST exit 0 even on failure: a crashing hook blocks
-// the session.
+// CLI entry: context [--budget N] | init-hook
+// context MUST exit 0 even on failure — a crashing hook blocks the Claude Code session.
 
 import { context } from "./context.js";
 import { findProjectDir, installHook } from "./init-hook.js";

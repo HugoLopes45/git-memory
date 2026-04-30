@@ -1,10 +1,7 @@
-// init-hook — write or merge a SessionStart entry into a project's
-// .claude/settings.json. Idempotent: same hookCommand twice = one entry.
-//
-// SessionStart re-injects the bundle on startup/resume/clear/compact — once
-// per event, not per turn — so the matcher defaults to those four sources.
-//
-// Atomic write via tmp + rename so a kill mid-flight can't corrupt the file.
+/**
+ * Install or merge a SessionStart hook entry into `.claude/settings.json`.
+ * Atomic: tmp + rename prevents corruption on crash. Idempotent: same command twice = one entry.
+ */
 
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -12,24 +9,18 @@ import { dirname, join, resolve } from "node:path";
 export interface InitHookOpts {
   projectDir: string;
   hookCommand: string;
+  /** Regex matched against SessionStart trigger source. Defaults to "startup|resume|clear|compact". */
   matcher?: string;
 }
 
 export interface InitHookResult {
   written: boolean;
-  // True when a legacy `bun "<path>" context...` entry was replaced because
-  // the referenced cli.ts no longer exists (typical after migrating from a
-  // bun-based install to an npm-based install).
+  /** True when a stale bun-based hook entry was replaced (post-migration to npm). */
   replaced?: boolean;
   path: string;
 }
 
-// Walk up from `start` looking for a directory containing .git (file or dir).
-// Falls back to `start` if no parent contains a git tree — caller's choice
-// to install hooks in a non-repo directory.
-//
-// Uses the dirname() fixpoint to detect the filesystem root so it works on
-// Windows (root "C:\\") as well as Unix.
+/** Walk up from start to find the .git directory. Falls back to start if no repo found. */
 export function findProjectDir(start: string): string {
   let cur = resolve(start);
   while (true) {
@@ -64,6 +55,7 @@ interface SettingsShape {
 // Anchored alternation — each source matches as a whole word.
 const DEFAULT_MATCHER = "startup|resume|clear|compact";
 
+/** Write or merge a SessionStart hook into .claude/settings.json. Idempotent: same command twice = one entry. */
 export function installHook(opts: InitHookOpts): InitHookResult {
   const claudeDir = join(opts.projectDir, ".claude");
   const path = join(claudeDir, "settings.json");

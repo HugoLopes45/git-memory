@@ -1,13 +1,11 @@
-// context() — pre-prompt bundle.
-//
-// Slice 2: budget-bounded. For each entry (newest first), try the FULL
-// rendering (bullet + indented body lines beyond the headline); fall back
-// to SHORT (bullet only) if full overflows; stop when even short overflows.
-// Single-line bodies render identically to the short form — the headline
-// already carries the only line, so there's nothing to indent.
+/**
+ * Build a token-budget-bounded bundle of recent notes for pre-prompt injection.
+ * Renders full bodies where they fit, falls back to headlines only when space is tight.
+ */
 
 import { type ListEntry, type ListOpts, findRepo, list, read } from "./index.js";
 
+/** Default token budget for the context bundle. */
 export const DEFAULT_BUDGET = 2000;
 
 export interface ContextOpts {
@@ -15,6 +13,7 @@ export interface ContextOpts {
   scope?: ListOpts["scope"];
   limit?: number | undefined;
   maxAgeDays?: number | undefined;
+  /** Token budget. Defaults to DEFAULT_BUDGET. */
   budget?: number | undefined;
 }
 
@@ -39,6 +38,7 @@ function renderFull(e: ListEntry, body: string): string {
   return `${renderShort(e)}\n${tail}`;
 }
 
+/** Build a token-bounded context bundle for pre-prompt injection. Returns empty string if no notes found. */
 export function context(opts: ContextOpts = {}): ContextResult {
   const repo = opts.repo ?? findRepo();
   const { entries } = list({ ...opts, repo });
