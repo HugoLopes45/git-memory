@@ -1,41 +1,52 @@
-export { context, type ContextOpts, type ContextResult } from "./context.js";
+/**
+ * Persistent memory for LLMs, branch-scoped, backed by git refs.
+ *
+ * - `record(opts)` — save a note to refs/agent-memory/<scope>/<slug>
+ * - `list(opts?)` — list headlines from current scope + main fallback
+ * - `read(opts)` — fetch a note's full body
+ * - `forget(opts)` — delete a note from a scope or all scopes
+ *
+ * Scope defaults to the current git branch. Slug defaults to sha1(body)[:12].
+ * Older note versions are accessible via `git log refs/agent-memory/<scope>/<slug>`.
+ */
 
-// git-memory — branch-aware memory for an LLM, stored as git refs.
-//
-// record({ body, slug?, scope?, by? })  → commit on refs/agent-memory/<scope>/<slug>
-// list({ scope?, prefix?, limit? })      → { entries, hidden } — current scope + main fallback
-// read({ slug, scope? })                 → full body
-// forget({ slug, scope? })               → delete a note from a scope
-//
-// Scope = a namespace (default: current git branch). Slug = identity within
-// the scope (default: sha1(body)[:12] — content-addressed, idempotent).
-// Reads from a non-trunk scope auto-fall-back to "main" if the slug isn't
-// found locally. The LLM never has to think about branches.
-//
-// "*" is the all-scopes sentinel for list/forget. SCOPE_RE rejects it as a
-// literal scope name, so the sentinel and scope-name namespaces are
-// disjoint by construction — no reserved-word table to maintain.
-//
-// Older versions of a note are reachable via `git log refs/agent-memory/<scope>/<slug>`.
+export { context, type ContextOpts, type ContextResult } from "./context.js";
 
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 
+/** Root namespace for all memory refs. */
 export const REF_ROOT = "refs/agent-memory/";
+
+/** Default scope (trunk) when not on a branch. */
 export const TRUNK_SCOPE = "main";
+
+/** Max note body length in chars. */
 export const MAX_BODY = 5000;
+
+/** Max slug length in chars. */
 export const MAX_SLUG = 80;
+
+/** Max scope length in chars. */
 export const MAX_SCOPE = 80;
+
+/** Max headline length in chars (first line of note body). */
 export const HEADLINE_MAX = 80;
+
+/** Default limit for list(). */
 export const LIST_DEFAULT_LIMIT = 50;
+
+/** Default max age in days for list(). */
 export const LIST_DEFAULT_MAX_AGE_DAYS = 30;
-// Bounded retry on update-ref CAS failure (concurrent writer raced us
-// between rev-parse and update-ref). N-way contention needs ~N retries
-// in the worst case (one winner per round); 20 covers realistic agent
-// concurrency without unbounded looping.
+
+/**
+ * Max retries on CAS lock contention.
+ * N-way contention needs ~N retries; 20 covers realistic agent concurrency.
+ */
 export const RECORD_MAX_RETRIES = 20;
+
 // Jitter between retries so losers don't slam git in lockstep — gives
 // the current winner room to finish before the next CAS attempt.
 const RETRY_JITTER_MAX_MS = 10;
@@ -83,6 +94,7 @@ function shTry(repo: string, args: readonly string[]): string | null {
   return r.status === 0 ? (r.stdout ?? "").toString().trim() : null;
 }
 
+/** Find the git repository root. Respects GIT_MEMORY_REPO env var. Throws if no repo found. */
 export function findRepo(start: string = process.cwd()): string {
   const env = process.env.GIT_MEMORY_REPO;
   if (env) {
@@ -112,12 +124,10 @@ function branchToScope(branch: string): string {
   return branch.replace(/\//g, "-").toLowerCase();
 }
 
-// Sentinel passed to list/forget meaning "every scope". Chosen so it
-// CANNOT be a valid scope name: SCOPE_RE requires [a-z0-9] as the first
-// char, so "*" is rejected by validateScope. No reserved-word logic
-// needed — the namespaces are disjoint by construction.
+/** Sentinel value to delete/list across all scopes. SCOPE_RE rejects "*" as a literal scope. */
 export const ALL_SCOPES = "*";
 
+/** Get the current scope (normalized branch name or main). Respects GIT_MEMORY_SCOPE env var. */
 export function currentScope(repo: string): string {
   const env = process.env.GIT_MEMORY_SCOPE;
   if (env) {
@@ -160,6 +170,8 @@ function refOf(scope: string, slug: string): string {
 // README's "treat memory pushes like code pushes" stance.
 // biome-ignore lint/suspicious/noControlCharactersInRegex: targeting these on purpose
 const HEADLINE_STRIP_RE = /[\x00-\x08\x0a-\x1f\x7f-\x9f]/g;
+
+/** Remove control characters from a headline (defense against malicious git refs). */
 export function sanitizeHeadline(s: string): string {
   return s.replace(HEADLINE_STRIP_RE, "");
 }
@@ -173,9 +185,7 @@ export interface RecordOpts {
   body: string;
   slug?: string | undefined;
   scope?: string | undefined;
-  // Override the author/committer name for this commit. Use when the
-  // recorded decision came from a named teammate or sub-agent and the
-  // attribution matters. Defaults to GIT_MEMORY_AUTHOR or "git-memory".
+  /** Override commit author name. Defaults to GIT_MEMORY_AUTHOR or "git-memory". */
   by?: string | undefined;
 }
 
@@ -193,6 +203,7 @@ export interface RecordResult {
   unchanged: boolean;
 }
 
+/** Save a note. Slug defaults to sha1(body)[:12]. Throws on validation failure or lock exhaustion. */
 export function record(opts: RecordOpts): RecordResult {
   if (typeof opts.body !== "string" || opts.body.trim().length === 0) {
     throw new Error("body must be a non-empty string");
@@ -257,23 +268,17 @@ export interface ListEntry {
 
 export interface ListResult {
   entries: ListEntry[];
-  // Count of entries dropped by maxAgeDays. Lets the caller (LLM) decide
-  // whether to retry with maxAgeDays:0 to surface older notes. Not affected
-  // by `limit` — overflow there means "raise limit", not "hidden by age".
+  /** Count of entries dropped by maxAgeDays. Retry with maxAgeDays:0 to surface older notes. */
   hidden: number;
 }
 
 export interface ListOpts {
   repo?: string | undefined;
-  // Pass ALL_SCOPES ("*") to read from every namespace. Any other string is
-  // treated as a literal scope name and validated against SCOPE_RE.
+  /** Scope filter: ALL_SCOPES for every namespace, string(s) for specific scopes. Defaults to current + main. */
   scope?: string | typeof ALL_SCOPES | string[] | undefined;
   prefix?: string | undefined;
   limit?: number | undefined;
-  // Hide notes whose latest commit is older than this many days. Pass 0 to
-  // disable (return everything). Default 30: a Claude Code session usually
-  // cares about the current sprint, not last quarter. Older context is still
-  // reachable by passing a larger value, or 0 for no cap.
+  /** Hide notes older than N days. Pass 0 to disable. Defaults to 30 (typical sprint window). */
   maxAgeDays?: number | undefined;
 }
 
@@ -287,11 +292,11 @@ function resolveScopes(repo: string, requested: ListOpts["scope"]): string[] {
     validateScope(requested);
     return [requested];
   }
-  // Default: current scope + trunk fallback (deduped).
   const cur = currentScope(repo);
   return cur === TRUNK_SCOPE ? [TRUNK_SCOPE] : [cur, TRUNK_SCOPE];
 }
 
+/** List note headlines, newest first. Returns entries and a count of hidden older notes. */
 export function list(opts: ListOpts = {}): ListResult {
   const repo = opts.repo ?? findRepo();
   const prefix = opts.prefix ?? "";
@@ -358,6 +363,7 @@ export interface ReadResult {
   body: string;
 }
 
+/** Read a note's full body. Falls back to main scope if not found locally. Throws if not found anywhere. */
 export function read(opts: ReadOpts): ReadResult {
   if (!opts.slug) throw new Error("slug required");
   const repo = opts.repo ?? findRepo();
@@ -383,18 +389,18 @@ export function read(opts: ReadOpts): ReadResult {
 export interface ForgetOpts {
   repo?: string | undefined;
   slug: string;
-  // Pass ALL_SCOPES ("*") to delete from every scope at once.
+  /** Pass ALL_SCOPES ("*") to delete from every scope at once. */
   scope?: string | typeof ALL_SCOPES | undefined;
 }
 
 export interface ForgetResult {
   deleted: boolean;
   scope: string;
-  // Populated only when scope === ALL_SCOPES: the scopes the slug was
-  // deleted from. Single-scope deletes leave this undefined.
+  /** Populated only when scope === ALL_SCOPES: the scopes the slug was actually deleted from. */
   scopes?: string[];
 }
 
+/** Delete a note from a scope or from all scopes (scope: ALL_SCOPES). Best-effort + idempotent. */
 export function forget(opts: ForgetOpts): ForgetResult {
   if (!opts.slug) throw new Error("slug required");
   validateSlug(opts.slug);

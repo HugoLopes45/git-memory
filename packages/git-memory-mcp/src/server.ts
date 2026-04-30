@@ -1,13 +1,16 @@
-// MCP server: 4 tools mirroring the SDK. record, list, read, forget.
-// Tool descriptions are written for an LLM consumer — they explain the
-// scope/slug model so the model can scope by branch or feature without
-// us shipping a facet system.
+/**
+ * MCP server exposing the 4 git-memory tools: record, list, read, forget.
+ * Tool descriptions target LLM consumers, enabling scope/branch organization without a facet system.
+ */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { forget, list, read, record } from "git-memory";
 import { z } from "zod";
 
+/** MCP server name. */
 export const SERVER_NAME = "git-memory";
+
+/** MCP server version. */
 export const SERVER_VERSION = "0.1.0";
 
 function ok(data: unknown) {
@@ -22,6 +25,7 @@ function fail(err: unknown) {
 const SCOPE_DESC =
   "scope = namespace; default is the current git branch. Pass 'main' to write trunk memory shared across branches.";
 
+/** Create the MCP server with the four git-memory tools registered. */
 export function createServer(): McpServer {
   const server = new McpServer({ name: SERVER_NAME, version: SERVER_VERSION });
 
