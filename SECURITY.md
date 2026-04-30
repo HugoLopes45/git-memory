@@ -12,7 +12,7 @@ The latest minor on the current major. Older versions receive no fixes.
 
 ## Threat Model
 
-git-memory stores agent notes as git refs. Note bodies become trusted prompt context for every agent turn. The trust boundary is documented in the README.
+git-memory stores agent notes as git refs. Note bodies become trusted prompt context for every agent turn. The trust boundary — including the scope auto-detection rules and when to set `GIT_MEMORY_SCOPE` explicitly — is documented in the README.
 
 ### In scope
 

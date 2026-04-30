@@ -108,7 +108,9 @@ Per-call author override: pass `by` to `record`.
 
 Note bodies become trusted prompt context for every agent turn. Don't sync `refs/agent-memory/*` from a remote you don't control — a teammate's note (or a compromised CI agent's) becomes part of your agent's instructions.
 
-**Treat memory pushes like code pushes.**
+**Scope is the trust boundary.** The library does not authenticate writers — anyone with write access to `refs/agent-memory/<scope>/*` can plant a note the agent will read on the next session and treat as instructions. Default scope is the auto-normalized current branch; branches with characters outside `[a-z0-9/-]` are rejected at the SDK boundary, but in-alphabet branches can still collapse to the same scope (`feat/foo-bar` and `feat-foo-bar` both → `feat-foo-bar`). For shared-repo or untrusted-peer scenarios, set `GIT_MEMORY_SCOPE` explicitly instead of relying on branch detection.
+
+**Treat memory pushes like code pushes.** `refs/agent-memory/*` is not pushed by the default refspec; explicit sync is opt-in. If you wire it, an attacker with write to that remote owns your agent's prompt.
 
 ---
 
