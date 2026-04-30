@@ -161,6 +161,12 @@ Bun `>=1.3.0`. `bun.lock` is canonical. Branches: `feat/<short-name>` from `main
 
 ---
 
+## Credits
+
+Inspired by [Mourad Ghafiri's `git-notes-memory`](https://github.com/mourad-ghafiri/git-notes-memory).
+
+---
+
 ## License
 
 [MIT](LICENSE).
