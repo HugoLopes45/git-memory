@@ -1,0 +1,61 @@
+{
+  "name": "git-memory-mcp",
+  "version": "0.1.0",
+  "type": "module",
+  "license": "MIT",
+  "description": "MCP server for git-memory — persistent memory for AI agents using git refs. Stdio transport. Works in Claude Code, Cursor, OpenCode.",
+  "keywords": [
+    "mcp",
+    "mcp-server",
+    "model-context-protocol",
+    "ai-agents",
+    "agent-memory",
+    "llm-memory",
+    "claude-code",
+    "anthropic",
+    "cursor",
+    "opencode"
+  ],
+  "author": "Hugo Lopes",
+  "homepage": "https://github.com/HugoLopes45/git-memory#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/HugoLopes45/git-memory.git",
+    "directory": "packages/git-memory-mcp"
+  },
+  "bugs": "https://github.com/HugoLopes45/git-memory/issues",
+  "main": "./dist/server.js",
+  "types": "./dist/server.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/server.d.ts",
+      "import": "./dist/server.js"
+    }
+  },
+  "bin": {
+    "git-memory-mcp": "./dist/bin.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "bun test",
+    "build": "tsc -p tsconfig.build.json",
+    "prepublishOnly": "bun run build"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "git-memory": "^0.1.0",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.7.2"
+  }
+}
