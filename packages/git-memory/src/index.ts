@@ -149,6 +149,21 @@ function refOf(scope: string, slug: string): string {
   return `${REF_ROOT}${scope}/${slug}`;
 }
 
+// Strip control chars from a headline before returning it to the caller.
+// Headlines come from `%(subject)` on refs we may have FETCHED from a
+// remote — the trust boundary documented in the README. A malicious commit
+// subject can carry ANSI escapes (ESC = 0x1B) that rewrite terminal output,
+// or BEL/BS/DEL that corrupt downstream JSON consumers. Drop everything
+// outside printable ASCII + tab; let LF/CR be removed too (subjects are
+// single-line anyway, but a lone CR can sneak through CRLF inputs).
+// Bodies are NOT sanitized here — that's the user's contract per the
+// README's "treat memory pushes like code pushes" stance.
+// biome-ignore lint/suspicious/noControlCharactersInRegex: targeting these on purpose
+const HEADLINE_STRIP_RE = /[\x00-\x08\x0a-\x1f\x7f-\x9f]/g;
+export function sanitizeHeadline(s: string): string {
+  return s.replace(HEADLINE_STRIP_RE, "");
+}
+
 function autoSlug(body: string): string {
   return createHash("sha1").update(body).digest("hex").slice(0, 12);
 }
@@ -302,7 +317,7 @@ export function list(opts: ListOpts = {}): ListResult {
     const parts = line.split("\t");
     const refname = parts[0] ?? "";
     const ts = parts[2] ?? "0";
-    const h = parts.slice(3).join("\t");
+    const h = sanitizeHeadline(parts.slice(3).join("\t"));
     if (!refname.startsWith(REF_ROOT)) continue;
     const tail = refname.slice(REF_ROOT.length); // <scope>/<slug...>
     const slash = tail.indexOf("/");
