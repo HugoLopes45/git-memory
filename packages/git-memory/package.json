@@ -1,0 +1,55 @@
+{
+  "name": "git-memory",
+  "version": "0.1.0",
+  "type": "module",
+  "license": "MIT",
+  "description": "Persistent memory for AI agents using git refs. Four verbs (record/list/read/forget), stored as commits on refs/agent-memory/<scope>/<slug>. No vector database, no embeddings, no daemon.",
+  "keywords": [
+    "ai-agents",
+    "llm",
+    "agent-memory",
+    "llm-memory",
+    "context-management",
+    "claude-code",
+    "anthropic",
+    "git",
+    "memory"
+  ],
+  "author": "Hugo Lopes",
+  "homepage": "https://github.com/HugoLopes45/git-memory#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/HugoLopes45/git-memory.git",
+    "directory": "packages/git-memory"
+  },
+  "bugs": "https://github.com/HugoLopes45/git-memory/issues",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "bin": {
+    "git-memory": "./dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "bun test",
+    "build": "tsc -p tsconfig.build.json",
+    "prepublishOnly": "bun run build"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.7.2"
+  }
+}
