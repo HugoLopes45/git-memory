@@ -23,6 +23,7 @@ import {
   list,
   read,
   record,
+  sanitizeHeadline,
 } from "../packages/git-memory/src/index.ts";
 
 import { type TempRepo, makeTempRepo } from "./helpers/repo.ts";
@@ -587,6 +588,73 @@ describe("git-memory edge cases", () => {
 
     test("body of just '\\r\\n' rejected as empty (whitespace trim)", () => {
       expect(() => record({ repo: fixture.repo, body: "\r\n", slug: "x" })).toThrow();
+    });
+  });
+
+  // ─── headline trust boundary ──────────────────────────────────────────────
+
+  // A note's commit subject can arrive from a fetched remote — that's the
+  // documented trust boundary. list() must scrub control chars from the
+  // subject before returning, so a malicious push can't paint the model's
+  // menu with ANSI escapes / BEL / DEL.
+  describe("headline trust boundary", () => {
+    // Synthesize a ref whose commit subject contains a chosen byte sequence.
+    // record()'s validation can't be used: it goes through the SDK contract
+    // we're trying to defend. plumb the bytes in via commit-tree directly,
+    // then point the ref at the resulting sha — same shape git fetch would
+    // have produced from a hostile remote.
+    function plantRef(repo: string, slug: string, subject: string): void {
+      const blob = spawnSync("git", ["-C", repo, "hash-object", "-w", "--stdin"], {
+        encoding: "utf8",
+        input: "body",
+      })
+        .stdout.toString()
+        .trim();
+      const tree = spawnSync("git", ["-C", repo, "mktree"], {
+        encoding: "utf8",
+        input: `100644 blob ${blob}\tnote.md\n`,
+      })
+        .stdout.toString()
+        .trim();
+      const sha = spawnSync("git", ["-C", repo, "commit-tree", tree], {
+        encoding: "utf8",
+        input: `${subject}\n`,
+      })
+        .stdout.toString()
+        .trim();
+      const ref = `${REF_ROOT}main/${slug}`;
+      spawnSync("git", ["-C", repo, "update-ref", ref, sha], { encoding: "utf8" });
+    }
+
+    test("ANSI escape in fetched subject is stripped on list()", () => {
+      plantRef(fixture.repo, "ansi", "\x1b[31mevil red text\x1b[0m");
+      const e = list({ repo: fixture.repo }).entries.find((x) => x.slug === "ansi");
+      expect(e?.h).toBe("[31mevil red text[0m");
+    });
+
+    test("BEL and DEL in fetched subject are stripped on list()", () => {
+      plantRef(fixture.repo, "bel", "ring\x07the\x7fbell");
+      const e = list({ repo: fixture.repo }).entries.find((x) => x.slug === "bel");
+      expect(e?.h).toBe("ringthebell");
+    });
+
+    test("C1 control char (0x9b CSI) in fetched subject is stripped on list()", () => {
+      plantRef(fixture.repo, "c1", "csiattack");
+      const e = list({ repo: fixture.repo }).entries.find((x) => x.slug === "c1");
+      expect(e?.h).toBe("csiattack");
+    });
+
+    test("normal text + embedded tab passes through unchanged", () => {
+      record({ repo: fixture.repo, body: "hello\tworld", slug: "tab2", scope: "main" });
+      const e = list({ repo: fixture.repo }).entries.find((x) => x.slug === "tab2");
+      expect(e?.h).toBe("hello\tworld");
+    });
+
+    test("sanitizeHeadline exported and pure", () => {
+      expect(sanitizeHeadline("plain text")).toBe("plain text");
+      expect(sanitizeHeadline("with\ttab")).toBe("with\ttab");
+      expect(sanitizeHeadline("\x1b[1mbold\x1b[0m")).toBe("[1mbold[0m");
+      expect(sanitizeHeadline("\x00\x07\x7f\x9f")).toBe("");
     });
   });
 
