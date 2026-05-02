@@ -55,10 +55,17 @@ describe("mneo-mcp", () => {
     fixture.cleanup();
   });
 
-  test("exposes 4 tools: record, list, read, forget", async () => {
+  test("exposes 6 tools: record, list, read, forget, push, fetch", async () => {
     await withClient(async (client) => {
       const { tools } = await client.listTools();
-      expect(tools.map((t) => t.name).sort()).toEqual(["forget", "list", "read", "record"]);
+      expect(tools.map((t) => t.name).sort()).toEqual([
+        "fetch",
+        "forget",
+        "list",
+        "push",
+        "read",
+        "record",
+      ]);
     });
   });
 

@@ -1,10 +1,10 @@
 /**
- * MCP server exposing the 4 mneo tools: record, list, read, forget.
+ * MCP server exposing the 6 mneo tools: record, list, read, forget, push, fetch.
  * Tool descriptions target LLM consumers, enabling scope/branch organization without a facet system.
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { MneoError, forget, list, read, recordAsync } from "mneo";
+import { MneoError, fetch, forget, list, push, read, recordAsync } from "mneo";
 import { z } from "zod";
 
 /** MCP server name. */
@@ -136,6 +136,45 @@ export function createServer(): McpServer {
     async (args) => {
       try {
         return ok(forget(args));
+      } catch (e) {
+        return fail(e);
+      }
+    },
+  );
+
+  server.registerTool(
+    "push",
+    {
+      description:
+        "Push memory refs to remote using --force-with-lease (CAS semantics). Fails with SYNC_CONFLICT if the remote has advanced; you must fetch and retry. Pass scope to push only that scope's refs; default is all scopes.",
+      inputSchema: {
+        remote: z.string().optional().describe("default 'origin'"),
+        scope: z.string().optional().describe(SCOPE_DESC),
+        repo: z.string().optional(),
+      },
+    },
+    async (args) => {
+      try {
+        return ok(push(args));
+      } catch (e) {
+        return fail(e);
+      }
+    },
+  );
+
+  server.registerTool(
+    "fetch",
+    {
+      description:
+        "Fetch memory refs from remote. No-op if remote has no refs/agent-memory/* branches. Always syncs all scopes regardless of the scope parameter (full multi-scope sync in one call).",
+      inputSchema: {
+        remote: z.string().optional().describe("default 'origin'"),
+        repo: z.string().optional(),
+      },
+    },
+    async (args) => {
+      try {
+        return ok(fetch(args));
       } catch (e) {
         return fail(e);
       }

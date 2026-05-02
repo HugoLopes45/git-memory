@@ -645,15 +645,13 @@ describe("mneo edge cases", () => {
       });
       forget({ repo: fixture.repo, slug: "leak", scope: "main" });
 
-      // ref is gone:
-      expect(
-        gitStatus(fixture.repo, ["rev-parse", "--verify", "--quiet", `${REF_ROOT}main/leak`]),
-      ).not.toBe(0);
-      // but the commit object survives:
+      // ref is still present but tombstoned (not deleted):
+      const sha = git(fixture.repo, ["rev-parse", `${REF_ROOT}main/leak`]);
+      expect(sha).toBeTruthy();
+      // The ref is not surfaced by list (tombstone is suppressed):
+      expect(list({ repo: fixture.repo, scope: "main" }).entries).toEqual([]);
+      // The commit object survives:
       expect(gitStatus(fixture.repo, ["cat-file", "-e", r.sha])).toBe(0);
-      // and the body is still readable through the (now-unreachable) commit:
-      const body = git(fixture.repo, ["show", `${r.sha}:note.md`]);
-      expect(body).toBe("secret-token-abc");
     });
 
     test("forget twice: second call returns deleted:false", () => {
@@ -744,13 +742,16 @@ describe("mneo edge cases", () => {
       expect(f).toEqual({ deleted: false, scope: "*", scopes: [] });
     });
 
-    test("forget then record same slug → fresh ref with no parent", () => {
+    test("forget then record same slug → record overwrites tombstone", () => {
       record({ repo: fixture.repo, body: "v1", slug: "x", scope: "main" });
       forget({ repo: fixture.repo, slug: "x", scope: "main" });
       const r = record({ repo: fixture.repo, body: "v2", slug: "x", scope: "main" });
       expect(r.unchanged).toBe(false);
-      const parents = git(fixture.repo, ["log", "--format=%P", `${REF_ROOT}main/x`]);
-      expect(parents).toBe("");
+      // After forget, record() writes over the tombstone (which becomes the parent)
+      const parents = git(fixture.repo, ["log", "--format=%P", `${REF_ROOT}main/x`]).split("\n")[0];
+      expect(parents).toBeTruthy(); // Parent is the tombstone
+      // But list() shows only the new note (tombstone is filtered)
+      expect(list({ repo: fixture.repo, scope: "main" }).entries.map((e) => e.slug)).toEqual(["x"]);
     });
 
     test("forget on a colliding branch refuses (recovery is explicit scope)", () => {

@@ -11,6 +11,7 @@
  * - CONFLICT        — CAS contention exhausted retries
  * - UNTRUSTED       — ref exists but its commit signature failed verification
  *                     (only emitted when MNEO_REQUIRE_SIGNED is set)
+ * - SYNC_CONFLICT   — push rejected due to non-fast-forward (remote advanced)
  */
 
 export type MneoErrorCode =
@@ -18,7 +19,8 @@ export type MneoErrorCode =
   | "INVALID_INPUT"
   | "REPO_BROKEN"
   | "CONFLICT"
-  | "UNTRUSTED";
+  | "UNTRUSTED"
+  | "SYNC_CONFLICT";
 
 export class MneoError extends Error {
   readonly code: MneoErrorCode;
@@ -61,5 +63,12 @@ export class UntrustedError extends MneoError {
   constructor(message: string) {
     super("UNTRUSTED", message);
     this.name = "UntrustedError";
+  }
+}
+
+export class SyncConflictError extends MneoError {
+  constructor(message: string) {
+    super("SYNC_CONFLICT", message);
+    this.name = "SyncConflictError";
   }
 }

@@ -4,7 +4,9 @@
  * - `record(opts)` — save a note to refs/agent-memory/<scope>/<slug>
  * - `list(opts?)` — list headlines from current scope + main fallback
  * - `read(opts)` — fetch a note's full body
- * - `forget(opts)` — delete a note from a scope or all scopes
+ * - `forget(opts)` — delete a note from a scope or all scopes (writes tombstone)
+ * - `push(opts?)` — push memory refs to remote with --force-with-lease
+ * - `fetch(opts?)` — fetch memory refs from remote
  *
  * Scope defaults to the current git branch. Slug defaults to sha1(body)[:12].
  * Older note versions are accessible via `git log refs/agent-memory/<scope>/<slug>`.
@@ -18,6 +20,7 @@ export {
   InvalidInputError,
   NotFoundError,
   RepoBrokenError,
+  SyncConflictError,
   UntrustedError,
 } from "./errors.js";
 
@@ -30,6 +33,7 @@ import {
   InvalidInputError,
   NotFoundError,
   RepoBrokenError,
+  SyncConflictError,
   UntrustedError,
 } from "./errors.js";
 
@@ -75,6 +79,9 @@ export const LIST_DEFAULT_MAX_AGE_DAYS = 30;
  * filter forever. 60s covers honest cross-machine clock skew.
  */
 export const SKEW_TOLERANCE_SECONDS = 60;
+
+/** Sentinel body indicating a note has been tombstoned (deleted). */
+export const TOMBSTONE_BODY = "__MNEO_TOMBSTONE__";
 
 /**
  * Max retries on CAS lock contention.
@@ -499,6 +506,8 @@ export function list(opts: ListOpts = {}): ListResult {
     if (slash < 0) continue;
     const scope = tail.slice(0, slash);
     const slug = tail.slice(slash + 1);
+    // Skip tombstoned notes — they are suppressed from list results.
+    if (h.startsWith(TOMBSTONE_BODY)) continue;
     // When scopes is empty (scope: "all" or []), the for-each-ref glob
     // doesn't constrain by prefix — apply it client-side here.
     if (scopes.length === 0 && prefix && !slug.startsWith(prefix)) continue;
@@ -612,9 +621,22 @@ export function read(opts: ReadOpts): ReadResult {
       }
       continue;
     }
+    if (body.startsWith(TOMBSTONE_BODY)) continue;
     return { slug: opts.slug, scope, body };
   }
   throw new NotFoundError(`note not found: ${opts.slug} (tried scopes: ${tryScopes.join(", ")})`);
+}
+
+function writeTombstone(repo: string, ref: string, currentSha: string): boolean {
+  // Check if already tombstoned (idempotency).
+  const body = shTry(repo, ["show", `${currentSha}:note.md`]);
+  if (body?.startsWith(TOMBSTONE_BODY)) return false;
+
+  const blob = sh(repo, ["hash-object", "-w", "--stdin"], TOMBSTONE_BODY).trim();
+  const tree = sh(repo, ["mktree"], `100644 blob ${blob}\tnote.md\n`).trim();
+  const commitSha = sh(repo, ["commit-tree", tree, "-p", currentSha], TOMBSTONE_BODY).trim();
+  sh(repo, ["update-ref", ref, commitSha, currentSha]);
+  return true;
 }
 
 export interface ForgetOpts {
@@ -631,18 +653,13 @@ export interface ForgetResult {
   scopes?: string[];
 }
 
-/** Delete a note from a scope or from all scopes (scope: ALL_SCOPES). Best-effort + idempotent. */
+/** Delete a note by writing a tombstone. Best-effort + idempotent. */
 export function forget(opts: ForgetOpts): ForgetResult {
   if (!opts.slug) throw new InvalidInputError("slug required");
   validateSlug(opts.slug);
   const repo = opts.repo ?? findRepo();
 
   if (opts.scope === ALL_SCOPES) {
-    // Best-effort + idempotent: walk every ref under REF_ROOT and delete the
-    // ones matching `slug`. A per-ref failure (concurrent writer moved or
-    // deleted the ref between our rev-parse and update-ref) does NOT abort
-    // the loop — re-running forget after a partial converges trivially,
-    // since deleted refs no longer match the slug filter.
     let out: string;
     try {
       out = sh(repo, ["for-each-ref", "--format=%(refname)", REF_ROOT]);
@@ -660,12 +677,11 @@ export function forget(opts: ForgetOpts): ForgetResult {
       const sha = shTry(repo, ["rev-parse", "--verify", "--quiet", ref]);
       if (!sha) continue;
       try {
-        sh(repo, ["update-ref", "-d", ref, sha]);
-        scopes.push(scope);
+        if (writeTombstone(repo, ref, sha)) {
+          scopes.push(scope);
+        }
       } catch {
-        // Ref moved or vanished between rev-parse and update-ref. Skip and
-        // keep going — caller can re-run to catch refs that materialize
-        // later, and this ref is either gone or owned by a fresher writer.
+        // Ref moved between rev-parse and update-ref. Skip and keep going.
       }
     }
     return { deleted: scopes.length > 0, scope: ALL_SCOPES, scopes };
@@ -676,13 +692,67 @@ export function forget(opts: ForgetOpts): ForgetResult {
   const ref = refOf(scope, opts.slug);
   const sha = shTry(repo, ["rev-parse", "--verify", "--quiet", ref]);
   if (!sha) return { deleted: false, scope };
-  // Race window: the ref existed at rev-parse but a concurrent writer can
-  // delete or move it before update-ref lands. Stay idempotent — match the
-  // ALL_SCOPES path by treating the failure as "already gone".
   try {
-    sh(repo, ["update-ref", "-d", ref, sha]);
+    const deleted = writeTombstone(repo, ref, sha);
+    return { deleted, scope };
   } catch {
     return { deleted: false, scope };
   }
-  return { deleted: true, scope };
+}
+
+export interface SyncOpts {
+  repo?: string | undefined;
+  scope?: string | typeof ALL_SCOPES | undefined;
+  remote?: string | undefined;
+}
+
+export interface SyncResult {
+  remote: string;
+  refs: number;
+}
+
+/** Push memory refs to remote with --force-with-lease (CAS semantics). Throws SyncConflictError on rejection. */
+export function push(opts: SyncOpts = {}): SyncResult {
+  const repo = opts.repo ?? findRepo();
+  const scope = opts.scope ?? ALL_SCOPES;
+  const remote = opts.remote ?? "origin";
+
+  const refspec =
+    scope === ALL_SCOPES
+      ? "refs/agent-memory/*:refs/agent-memory/*"
+      : `refs/agent-memory/${scope}/*:refs/agent-memory/${scope}/*`;
+
+  try {
+    sh(repo, ["push", remote, refspec, "--force-with-lease"]);
+    // Count refs available after successful push
+    const out = sh(repo, ["for-each-ref", "--format=%(refname)", "refs/agent-memory"]);
+    const refs = out.split("\n").filter(Boolean).length;
+    return { remote, refs };
+  } catch (e) {
+    throw new SyncConflictError(
+      `push to ${remote} rejected: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+}
+
+/** Fetch memory refs from remote. No-op if refs don't exist on remote. */
+export function fetch(opts: SyncOpts = {}): SyncResult {
+  const repo = opts.repo ?? findRepo();
+  const remote = opts.remote ?? "origin";
+
+  try {
+    sh(repo, ["fetch", remote, "refs/agent-memory/*:refs/agent-memory/*"]);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    // If remote has no refs, git reports "couldn't find remote ref" — that is not an error.
+    // Any other error (auth, network, etc.) should propagate.
+    if (!msg.includes("couldn't find remote ref")) {
+      throw e;
+    }
+  }
+
+  const out = sh(repo, ["for-each-ref", "--format=%(refname)", "refs/agent-memory"]);
+  const refs = out.split("\n").filter(Boolean).length;
+
+  return { remote, refs };
 }
