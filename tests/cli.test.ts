@@ -160,4 +160,62 @@ describe("mneo CLI — failure isolation", () => {
       expect(stdout).toMatch(/Already configured/);
     });
   });
+
+  // ─── install end-to-end (hook + mcp + skill in one shot) ────────────────
+
+  describe("install", () => {
+    let proj: string;
+
+    beforeEach(() => {
+      proj = mkdtempSync(join(tmpdir(), "install-cli-"));
+    });
+
+    afterEach(() => {
+      rmSync(proj, { recursive: true, force: true });
+    });
+
+    test("first run wires hook, mcp, skill and reports each line", () => {
+      const { code, stdout } = runCli(["install"], { cwd: proj });
+      expect(code).toBe(0);
+      expect(stdout).toMatch(/hook:\s+wrote/);
+      expect(stdout).toMatch(/mcp:\s+wrote/);
+      expect(stdout).toMatch(/skill:\s+wrote/);
+
+      const settings = JSON.parse(readFileSync(join(proj, ".claude", "settings.json"), "utf8"));
+      expect(settings.hooks.SessionStart[0].hooks[0].command).toBe(
+        "npx -y mneo context --budget 2000",
+      );
+      expect(settings.mcpServers.mneo).toEqual({
+        command: "npx",
+        args: ["-y", "mneo-mcp"],
+      });
+
+      const skillBody = readFileSync(join(proj, ".claude", "skills", "mneo", "SKILL.md"), "utf8");
+      expect(skillBody).toMatch(/^---\s*\nname: mneo/);
+    });
+
+    test("re-running on a configured project reports each line as unchanged", () => {
+      runCli(["install"], { cwd: proj });
+      const { code, stdout } = runCli(["install"], { cwd: proj });
+      expect(code).toBe(0);
+      expect(stdout).toMatch(/hook:\s+unchanged/);
+      expect(stdout).toMatch(/mcp:\s+unchanged/);
+      expect(stdout).toMatch(/skill:\s+unchanged/);
+    });
+
+    test("install merges into a pre-existing settings.json without clobbering unrelated keys", () => {
+      const settingsPath = join(proj, ".claude", "settings.json");
+      mkdirSync(join(proj, ".claude"), { recursive: true });
+      writeFileSync(
+        settingsPath,
+        JSON.stringify({ permissions: { allow: ["Bash(ls:*)"] } }, null, 2),
+      );
+      const { code } = runCli(["install"], { cwd: proj });
+      expect(code).toBe(0);
+      const settings = JSON.parse(readFileSync(settingsPath, "utf8"));
+      expect(settings.permissions).toEqual({ allow: ["Bash(ls:*)"] });
+      expect(settings.hooks.SessionStart).toBeDefined();
+      expect(settings.mcpServers.mneo).toBeDefined();
+    });
+  });
 });

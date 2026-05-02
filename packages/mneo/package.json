@@ -37,12 +37,13 @@
   "files": [
     "dist",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "SKILL.md"
   ],
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "bun test",
-    "build": "tsc -p tsconfig.build.json",
+    "build": "cp ../../SKILL.md ./SKILL.md && tsc -p tsconfig.build.json",
     "prepublishOnly": "bun run build"
   },
   "engines": {
