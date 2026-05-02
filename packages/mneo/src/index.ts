@@ -728,9 +728,9 @@ export function push(opts: SyncOpts = {}): SyncResult {
     const out = sh(repo, ["for-each-ref", "--format=%(refname)", "refs/agent-memory"]);
     const refs = out.split("\n").filter(Boolean).length;
     return { remote, refs };
-  } catch (e) {
+  } catch {
     throw new SyncConflictError(
-      `push to ${remote} rejected: ${e instanceof Error ? e.message : String(e)}`,
+      `push to ${remote} rejected (remote has advanced): fetch and retry`,
     );
   }
 }

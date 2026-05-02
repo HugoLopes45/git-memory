@@ -32,7 +32,7 @@ function fail(err: unknown) {
 const SCOPE_DESC =
   "scope = namespace; default is the current git branch. Pass 'main' to write trunk memory shared across branches.";
 
-/** Create the MCP server with the four mneo tools registered. */
+/** Create the MCP server with the six mneo tools registered. */
 export function createServer(): McpServer {
   const server = new McpServer({ name: SERVER_NAME, version: SERVER_VERSION });
 
@@ -146,7 +146,7 @@ export function createServer(): McpServer {
     "push",
     {
       description:
-        "Push memory refs to remote using --force-with-lease (CAS semantics). Fails with SYNC_CONFLICT if the remote has advanced; you must fetch and retry. Pass scope to push only that scope's refs; default is all scopes.",
+        "Push memory refs to remote using --force-with-lease (CAS semantics). Returns { remote, refs } on success. Fails with SYNC_CONFLICT if the remote has advanced; fetch and retry. Pass scope to push only that scope's refs; default is all scopes.",
       inputSchema: {
         remote: z.string().optional().describe("default 'origin'"),
         scope: z.string().optional().describe(SCOPE_DESC),
@@ -166,7 +166,7 @@ export function createServer(): McpServer {
     "fetch",
     {
       description:
-        "Fetch memory refs from remote. No-op if remote has no refs/agent-memory/* branches. Always syncs all scopes regardless of the scope parameter (full multi-scope sync in one call).",
+        "Fetch memory refs from remote. Returns { remote, refs } where refs is the count of memory refs now available locally (0 if remote has no refs/agent-memory/* branches). Always syncs all scopes (full multi-scope sync in one call); scope parameter is ignored.",
       inputSchema: {
         remote: z.string().optional().describe("default 'origin'"),
         repo: z.string().optional(),
