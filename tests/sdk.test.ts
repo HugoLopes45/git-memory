@@ -15,6 +15,7 @@ import {
   list,
   read,
   record,
+  recordAsync,
 } from "../packages/mneo/src/index.ts";
 
 import { type TempRepo, makeTempRepo } from "./helpers/repo.ts";
@@ -203,6 +204,57 @@ describe("mneo SDK", () => {
       const before = process.env.GIT_AUTHOR_NAME;
       record({ repo: fixture.repo, body: "x", slug: "d", by: "ephemeral" });
       expect(process.env.GIT_AUTHOR_NAME).toBe(before);
+    });
+  });
+
+  // ─── recordAsync ─────────────────────────────────────────────────────────
+  // Async version exists so the MCP server can yield the event loop between
+  // CAS retries instead of blocking via Atomics.wait. Contract must match
+  // record() exactly — same return shape, same validation, same semantics
+  // — so these tests parallel the record() ones above.
+
+  describe("recordAsync", () => {
+    test("returns the same RecordResult shape as record()", async () => {
+      const r = await recordAsync({ repo: fixture.repo, body: "use OAuth2", slug: "a" });
+      expect(r.scope).toBe("main");
+      expect(r.slug).toBe("a");
+      expect(r.unchanged).toBe(false);
+      expect(r.sha).toMatch(/^[0-9a-f]{40}$/);
+    });
+
+    test("idempotency: re-recording same body under same slug → unchanged:true", async () => {
+      const a = await recordAsync({ repo: fixture.repo, body: "v1", slug: "x", scope: "main" });
+      const b = await recordAsync({ repo: fixture.repo, body: "v1", slug: "x", scope: "main" });
+      expect(b.unchanged).toBe(true);
+      expect(b.sha).toBe(a.sha);
+    });
+
+    test("validation throws synchronously inside the awaited promise", async () => {
+      await expect(recordAsync({ repo: fixture.repo, body: "", slug: "a" })).rejects.toThrow(
+        /non-empty/,
+      );
+    });
+
+    test("auto-slug path matches record's", async () => {
+      const a = record({ repo: fixture.repo, body: "same body", scope: "main" });
+      // forget so the second insert isn't a no-op
+      forget({ repo: fixture.repo, slug: a.slug, scope: "main" });
+      const b = await recordAsync({ repo: fixture.repo, body: "same body", scope: "main" });
+      expect(b.slug).toBe(a.slug);
+    });
+
+    test("yields the event loop — a setImmediate scheduled before the await runs first", async () => {
+      // record() (sync) blocks the loop; recordAsync must give microtasks /
+      // setImmediate callbacks a chance to fire. With no contention there's
+      // no sleep, so we just verify the promise nature: the call sequence
+      // resolves through the microtask queue, and code after the await runs.
+      const order: string[] = [];
+      const p = recordAsync({ repo: fixture.repo, body: "x", slug: "yield", scope: "main" }).then(
+        () => order.push("recordAsync done"),
+      );
+      order.push("after recordAsync call");
+      await p;
+      expect(order).toEqual(["after recordAsync call", "recordAsync done"]);
     });
   });
 

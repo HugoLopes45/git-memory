@@ -4,6 +4,9 @@ node_modules/
 # build artifacts
 dist/
 *.tsbuildinfo
+# SKILL.md is canonical at the repo root; the build step copies it into
+# packages/mneo/ so it ships with the published package.
+packages/mneo/SKILL.md
 
 # env / secrets
 .env

@@ -57,20 +57,32 @@ Requires Node `>=18` and `git >= 2.31`.
 
 ## Wire it into Claude Code (MCP server + skill)
 
-Three pieces, one command each.
-
-**1. Session-start hook** — auto-loads recent memory into the agent's context at session start:
+One command:
 
 ```bash
 cd your-project
-npx -y mneo init-hook
+npx -y mneo install
 ```
 
-Fires on `startup | resume | clear | compact`. Errors exit 0 — broken memory never blocks the agent.
+Wires three pieces into `.claude/`:
 
-**2. MCP server** — exposes the four verbs to the model:
+1. **Session-start hook** that auto-loads recent memory into the agent's context on `startup | resume | clear | compact`. Errors exit 0 — broken memory never blocks the agent.
+2. **MCP server entry** under `mcpServers.mneo` exposing the four verbs to the model.
+3. **Skill file** at `.claude/skills/mneo/SKILL.md` telling the model when to call which verb.
+
+All writes are atomic (tmp + rename) and idempotent — re-running `mneo install` on a configured project reports each piece as `unchanged`. Existing settings.json keys (permissions, other MCP servers, other hook entries) are preserved.
+
+The hook injects recent headlines automatically. The skill tells the model when to expand them with `read`, or pull older notes via `list({ maxAgeDays: 0 })`.
+
+<details>
+<summary>Manual install (if you don't want the orchestrator)</summary>
+
+```bash
+npx -y mneo init-hook       # 1. SessionStart hook only
+```
 
 ```jsonc
+// 2. .claude/settings.json — MCP server entry
 {
   "mcpServers": {
     "mneo": {
@@ -81,14 +93,12 @@ Fires on `startup | resume | clear | compact`. Errors exit 0 — broken memory n
 }
 ```
 
-**3. Skill file** — tells the model when to call which verb:
-
 ```bash
+# 3. Skill file
 mkdir -p .claude/skills/mneo
 ln -s "$(pwd)/SKILL.md" .claude/skills/mneo/SKILL.md
 ```
-
-The hook injects recent headlines automatically. The skill tells the model when to expand them with `read`, or pull older notes via `list({ maxAgeDays: 0 })`.
+</details>
 
 ---
 
@@ -97,8 +107,9 @@ The hook injects recent headlines automatically. The skill tells the model when 
 | Var | Default | Use |
 |---|---|---|
 | `MNEO_REPO` | walks up from `cwd` | repo path override |
-| `MNEO_SCOPE` | current branch | useful in CI / detached HEAD |
+| `MNEO_SCOPE` | current branch | useful in CI / detached HEAD; also disambiguates branch-collision throws |
 | `MNEO_AUTHOR` | `mneo <agent@mneo>` | stamp commits with the agent's identity |
+| `MNEO_REQUIRE_SIGNED` | unset | `1` or `true` → gate `list` / `read` on `git verify-commit`; unsigned notes are filtered (counted as `untrusted`) and `read` throws `UntrustedError`. You configure git's signing keys (`gpg.format`, `user.signingkey`, `gpg.ssh.allowedSignersFile`); mneo asks the question. |
 
 Per-call author override: pass `by` to `record`.
 
@@ -108,9 +119,11 @@ Per-call author override: pass `by` to `record`.
 
 Note bodies become trusted prompt context for every agent turn. Don't sync `refs/agent-memory/*` from a remote you don't control — a teammate's note (or a compromised CI agent's) becomes part of your agent's instructions.
 
-**Scope is the trust boundary.** The library does not authenticate writers — anyone with write access to `refs/agent-memory/<scope>/*` can plant a note the agent will read on the next session and treat as instructions. Default scope is the auto-normalized current branch; branches with characters outside `[a-z0-9/-]` are rejected at the SDK boundary, but in-alphabet branches can still collapse to the same scope (`feat/foo-bar` and `feat-foo-bar` both → `feat-foo-bar`). For shared-repo or untrusted-peer scenarios, set `MNEO_SCOPE` explicitly instead of relying on branch detection.
+**Scope is the trust boundary.** The library does not authenticate writers by default — anyone with write access to `refs/agent-memory/<scope>/*` can plant a note the agent will read on the next session and treat as instructions. Default scope is the auto-normalized current branch; branches with characters outside `[a-z0-9/-]` are rejected at the SDK boundary, and branches that would normalize to the same scope (e.g. `feat/foo-bar` and `feat-foo-bar`) now throw `InvalidInputError` at call time — set `MNEO_SCOPE` explicitly or pass an explicit `scope` to disambiguate.
 
-**Treat memory pushes like code pushes.** `refs/agent-memory/*` is not pushed by the default refspec; explicit sync is opt-in. If you wire it, an attacker with write to that remote owns your agent's prompt.
+**Opt-in signature gate.** Set `MNEO_REQUIRE_SIGNED=1` to refuse notes whose commit doesn't pass `git verify-commit`. Unsigned entries are dropped from `list` (counted as `untrusted`); `read` throws `UntrustedError`. You configure git's signing keys; mneo asks the question. Recommended whenever you fetch `refs/agent-memory/*` from a remote you don't fully control.
+
+**Treat memory pushes like code pushes.** `refs/agent-memory/*` is not pushed by the default refspec; explicit sync is opt-in. If you wire it, an attacker with write to that remote owns your agent's prompt — unless you've gated reads via `MNEO_REQUIRE_SIGNED`.
 
 ---
 
@@ -123,9 +136,18 @@ Note bodies become trusted prompt context for every agent turn. Don't sync `refs
 | scope | `^[a-z0-9][a-z0-9-]*$`, ≤80 chars |
 | headline | first 80 chars of body |
 
-`record` is idempotent: same body under the same `(scope, slug)` → no new commit, returns `{ unchanged: true }`.
+`record` is idempotent: same body under the same `(scope, slug)` → no new commit, returns `{ unchanged: true }`. `recordAsync` is the same contract over a Promise — use it from MCP servers and other async hosts so a contended write doesn't block the event loop.
 
-`list({})` returns notes from the last 30 days, capped at 50, with a `hidden` count for what got dropped. `maxAgeDays: 0` to surface them.
+`list({})` returns notes from the last 30 days, capped at 50. The result carries up to four counters so callers can detect silent drops:
+
+| Field | Meaning |
+|---|---|
+| `hidden` | dropped by `maxAgeDays`. Retry with `maxAgeDays: 0` to reach them. |
+| `untrusted` | dropped because their commit failed `git verify-commit` (only present when `MNEO_REQUIRE_SIGNED` is set). |
+| `skewed` | dropped because their commit is dated more than 60s in the future (defends against pinning attacks). |
+| `more` | survived every filter but didn't fit under `limit`. Raise `limit` to see them. |
+
+The 30-day window and 50-entry cap are heuristics in the absence of a calibrated retrieval benchmark — pass explicit `maxAgeDays` / `limit` when your workload differs.
 
 `forget({ scope: "*" })` removes the slug from every scope.
 

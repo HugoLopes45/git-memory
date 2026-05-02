@@ -14,6 +14,8 @@ The latest minor on the current major. Older versions receive no fixes.
 
 mneo stores agent notes as git refs. Note bodies become trusted prompt context for every agent turn. The trust boundary — including the scope auto-detection rules and when to set `MNEO_SCOPE` explicitly — is documented in the README.
 
+For workflows that fetch `refs/agent-memory/*` from a remote you don't fully control, set `MNEO_REQUIRE_SIGNED=1` to gate `list` / `read` on `git verify-commit`. Unsigned notes are filtered out of `list` (counted as `untrusted`) and `read` throws `UntrustedError`. You configure git's signing keys (`gpg.format`, `user.signingkey`, `gpg.ssh.allowedSignersFile`); mneo asks the question.
+
 ### In scope
 
 - Sentinel collision or scope escape (a slug or scope value that bypasses the regex and writes outside the intended namespace).
@@ -22,9 +24,11 @@ mneo stores agent notes as git refs. Note bodies become trusted prompt context f
 - Race conditions on concurrent `record` / `forget` calls that corrupt refs.
 - The session-start hook leaking note content outside the agent process.
 - Vulnerabilities in the MCP server's stdio transport.
+- Pinning attacks via future-dated commit timestamps that bypass `maxAgeDays` — mitigated by the 60s skew tolerance (`SKEW_TOLERANCE_SECONDS`); a regression in that filter is in scope.
+- Bypass of the `MNEO_REQUIRE_SIGNED` gate (e.g. an unsigned note surfacing in `list` or readable via `read` while the env flag is set).
 
 ### Out of scope
 
-- An attacker who already has write access to your local repo or to a remote you've fetched from. `Treat memory pushes like code pushes` — a teammate's compromised note is your problem to detect, not ours to prevent at the protocol level.
+- An attacker who already has write access to your local repo or to a remote you've fetched from, with `MNEO_REQUIRE_SIGNED` unset. `Treat memory pushes like code pushes` — a teammate's compromised note is your problem to detect at that point. The signed-commit gate is the recommended defense.
 - DoS by recording very large numbers of notes (caps documented in the README).
 - Vulnerabilities in `git` itself, or in Node, Bun, or `@modelcontextprotocol/sdk`.
