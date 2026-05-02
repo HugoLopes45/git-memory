@@ -17,7 +17,9 @@ import {
   MAX_BODY,
   MAX_SCOPE,
   MAX_SLUG,
+  type MneoError,
   REF_ROOT,
+  UntrustedError,
   findRepo,
   forget,
   list,
@@ -233,17 +235,217 @@ describe("mneo edge cases", () => {
       expect(r.scope).toBe("feat-auth");
     });
 
-    test("GOTCHA: 'feat/foo-bar' and 'feat-foo-bar' collide on the same scope", () => {
-      // Both branches map to scope 'feat-foo-bar'. From the second branch,
-      // list() and read() see the first branch's notes as their own — no
-      // warning. This is a silent merge of memories across distinct branches.
+    test("'feat/foo-bar' and 'feat-foo-bar' collision throws on auto-detect", () => {
+      // Both branches map to scope 'feat-foo-bar'. Auto-detected currentScope()
+      // refuses to silently merge their refs; recovery is MNEO_SCOPE or an
+      // explicit scope arg.
       checkout(fixture.repo, "feat/foo-bar");
-      record({ repo: fixture.repo, body: "from-slash", slug: "x" });
       switchTo(fixture.repo, "main");
       checkout(fixture.repo, "feat-foo-bar");
-      const { entries } = list({ repo: fixture.repo });
-      expect(entries.find((e) => e.slug === "x")?.scope).toBe("feat-foo-bar");
-      expect(read({ repo: fixture.repo, slug: "x" }).body).toBe("from-slash");
+      expect(() => record({ repo: fixture.repo, body: "x", slug: "x" })).toThrow(
+        /collide|MNEO_SCOPE/,
+      );
+    });
+  });
+
+  // ─── scope collision detection ────────────────────────────────────────────
+
+  describe("scope collision detection", () => {
+    test("currentScope throws when another branch normalizes to the same scope", () => {
+      checkout(fixture.repo, "feat/foo-bar");
+      record({ repo: fixture.repo, body: "from-slash", slug: "x", scope: "feat-foo-bar" });
+      switchTo(fixture.repo, "main");
+      checkout(fixture.repo, "feat-foo-bar");
+      expect(() => list({ repo: fixture.repo })).toThrow(/feat-foo-bar.*collide/);
+      expect(() => read({ repo: fixture.repo, slug: "x" })).toThrow(/collide/);
+      expect(() => forget({ repo: fixture.repo, slug: "x" })).toThrow(/collide/);
+    });
+
+    test("MNEO_SCOPE bypasses the collision check", () => {
+      checkout(fixture.repo, "feat/foo-bar");
+      switchTo(fixture.repo, "main");
+      checkout(fixture.repo, "feat-foo-bar");
+      withEnv({ MNEO_SCOPE: "explicit-scope" }, () => {
+        const r = record({ repo: fixture.repo, body: "y", slug: "y" });
+        expect(r.scope).toBe("explicit-scope");
+      });
+    });
+
+    test("explicit scope arg bypasses the collision check", () => {
+      checkout(fixture.repo, "feat/foo-bar");
+      switchTo(fixture.repo, "main");
+      checkout(fixture.repo, "feat-foo-bar");
+      const r = record({ repo: fixture.repo, body: "y", slug: "y", scope: "main" });
+      expect(r.scope).toBe("main");
+    });
+
+    test("branches with chars outside the alphabet are not counted as collisions", () => {
+      // 'feat_x' contains '_' which branchToScope rejects — it cannot produce a
+      // scope, so it can't collide against 'feat-x'. Verifies the check skips
+      // unconvertible branches instead of throwing on them.
+      checkout(fixture.repo, "feat_x");
+      switchTo(fixture.repo, "main");
+      checkout(fixture.repo, "feat-x");
+      const r = record({ repo: fixture.repo, body: "y", slug: "y" });
+      expect(r.scope).toBe("feat-x");
+    });
+
+    test("colliding-scope notes remain reachable via explicit scope arg", () => {
+      checkout(fixture.repo, "feat/foo-bar");
+      record({ repo: fixture.repo, body: "from-slash", slug: "x", scope: "feat-foo-bar" });
+      switchTo(fixture.repo, "main");
+      checkout(fixture.repo, "feat-foo-bar");
+      // Auto-detect would throw, but explicit scope is the documented recovery.
+      expect(read({ repo: fixture.repo, slug: "x", scope: "feat-foo-bar" }).body).toBe(
+        "from-slash",
+      );
+    });
+
+    test("single branch (no peers) does not trigger the check", () => {
+      // Sanity: the only-branch case must not false-positive against itself.
+      checkout(fixture.repo, "feat/auth");
+      const r = record({ repo: fixture.repo, body: "y", slug: "y" });
+      expect(r.scope).toBe("feat-auth");
+    });
+  });
+
+  // ─── MNEO_REQUIRE_SIGNED trust gate ───────────────────────────────────────
+  // Opt-in defense against the documented push-injection vector. The test
+  // repo's commits are unsigned by default — that's enough surface for the
+  // negative path. The positive (signed → passes) path relies on the user's
+  // own gpg/ssh setup and is covered by `git verify-commit` itself.
+
+  describe("MNEO_REQUIRE_SIGNED trust gate", () => {
+    test("env unset: unsigned notes are visible; result has no `untrusted` field", () => {
+      record({ repo: fixture.repo, body: "x", slug: "a", scope: "main" });
+      const r = list({ repo: fixture.repo });
+      expect(r.entries.map((e) => e.slug)).toEqual(["a"]);
+      expect(r.untrusted).toBeUndefined();
+    });
+
+    test("env=1 + unsigned commit: list filters all entries and reports the count", () => {
+      record({ repo: fixture.repo, body: "x", slug: "a", scope: "main" });
+      record({ repo: fixture.repo, body: "y", slug: "b", scope: "main" });
+      withEnv({ MNEO_REQUIRE_SIGNED: "1" }, () => {
+        const r = list({ repo: fixture.repo });
+        expect(r.entries).toEqual([]);
+        expect(r.untrusted).toBe(2);
+      });
+    });
+
+    test("env='true' is accepted as the same opt-in as '1'", () => {
+      record({ repo: fixture.repo, body: "x", slug: "a", scope: "main" });
+      withEnv({ MNEO_REQUIRE_SIGNED: "true" }, () => {
+        const r = list({ repo: fixture.repo });
+        expect(r.untrusted).toBe(1);
+      });
+    });
+
+    test("env=1 + no entries: result still includes untrusted: 0 (signals trust posture)", () => {
+      withEnv({ MNEO_REQUIRE_SIGNED: "1" }, () => {
+        const r = list({ repo: fixture.repo });
+        expect(r.entries).toEqual([]);
+        expect(r.untrusted).toBe(0);
+      });
+    });
+
+    test("env=1 + unsigned commit: read throws UntrustedError with code UNTRUSTED", () => {
+      record({ repo: fixture.repo, body: "x", slug: "a", scope: "main" });
+      withEnv({ MNEO_REQUIRE_SIGNED: "1" }, () => {
+        try {
+          read({ repo: fixture.repo, slug: "a", scope: "main" });
+          throw new Error("expected UntrustedError");
+        } catch (e) {
+          expect(e).toBeInstanceOf(UntrustedError);
+          expect((e as MneoError).code).toBe("UNTRUSTED");
+          expect((e as Error).message).toMatch(/unverified signature|MNEO_REQUIRE_SIGNED/);
+        }
+      });
+    });
+
+    test("env=0 is treated as off (only '1' or 'true' opt in)", () => {
+      record({ repo: fixture.repo, body: "x", slug: "a", scope: "main" });
+      withEnv({ MNEO_REQUIRE_SIGNED: "0" }, () => {
+        const r = list({ repo: fixture.repo });
+        expect(r.entries.map((e) => e.slug)).toEqual(["a"]);
+        expect(r.untrusted).toBeUndefined();
+      });
+    });
+  });
+
+  // ─── future-dated commits / skew tolerance ────────────────────────────────
+  // Defends against pinning attacks: a malicious commit-date in the future
+  // would otherwise bypass maxAgeDays forever (now - future < 0 ≤ 30d).
+
+  describe("future-dated commits", () => {
+    function recordAt(repo: string, body: string, secondsFromNow: number, slug: string) {
+      const ts = `${Math.floor(Date.now() / 1000) + secondsFromNow} +0000`;
+      withEnv({ GIT_AUTHOR_DATE: ts, GIT_COMMITTER_DATE: ts }, () => {
+        record({ repo, body, slug, scope: "main" });
+      });
+    }
+
+    test("commit dated >60s in the future is dropped from list, counted in `skewed`", () => {
+      recordAt(fixture.repo, "x", 86400, "future-day"); // 1 day ahead
+      record({ repo: fixture.repo, body: "y", slug: "now-note", scope: "main" });
+      const r = list({ repo: fixture.repo });
+      expect(r.entries.map((e) => e.slug)).toEqual(["now-note"]);
+      expect(r.skewed).toBe(1);
+    });
+
+    test("commit within +60s skew tolerance is kept (no false positive)", () => {
+      recordAt(fixture.repo, "x", 30, "barely-future");
+      const r = list({ repo: fixture.repo });
+      expect(r.entries.map((e) => e.slug)).toEqual(["barely-future"]);
+      expect(r.skewed).toBeUndefined();
+    });
+
+    test("future-dated entry no longer pins to the top after sane note appears", () => {
+      // Pre-fix behaviour: future-dated note dominates --sort=-creatordate
+      // forever and never ages out. Post-fix: dropped → sane entries surface.
+      recordAt(fixture.repo, "evil", 365 * 86400, "evil"); // 1y future
+      record({ repo: fixture.repo, body: "good", slug: "good", scope: "main" });
+      const r = list({ repo: fixture.repo });
+      expect(r.entries.map((e) => e.slug)).toEqual(["good"]);
+      expect(r.skewed).toBe(1);
+    });
+
+    test("`skewed` is omitted from the result when no entries are dropped", () => {
+      record({ repo: fixture.repo, body: "x", slug: "a", scope: "main" });
+      const r = list({ repo: fixture.repo });
+      expect(r.skewed).toBeUndefined();
+    });
+  });
+
+  // ─── limit overflow surfaced as `more` ────────────────────────────────────
+
+  describe("limit overflow", () => {
+    test("more > 0 when filtered entries don't fit under limit", () => {
+      for (let i = 0; i < 5; i++) {
+        record({ repo: fixture.repo, body: `v${i}`, slug: `n${i}`, scope: "main" });
+      }
+      const r = list({ repo: fixture.repo, limit: 2 });
+      expect(r.entries).toHaveLength(2);
+      expect(r.more).toBe(3);
+    });
+
+    test("more is omitted when limit accommodates everything", () => {
+      record({ repo: fixture.repo, body: "x", slug: "a", scope: "main" });
+      record({ repo: fixture.repo, body: "y", slug: "b", scope: "main" });
+      const r = list({ repo: fixture.repo, limit: 10 });
+      expect(r.entries).toHaveLength(2);
+      expect(r.more).toBeUndefined();
+    });
+
+    test("more is omitted when limit is unlimited (0)", () => {
+      // Hmm — limit:0 currently returns all entries (limit > 0 gate). No
+      // truncation can happen, so `more` must be omitted, not 0.
+      for (let i = 0; i < 3; i++) {
+        record({ repo: fixture.repo, body: `v${i}`, slug: `n${i}`, scope: "main" });
+      }
+      const r = list({ repo: fixture.repo, limit: 0 });
+      expect(r.entries).toHaveLength(3);
+      expect(r.more).toBeUndefined();
     });
   });
 
@@ -551,17 +753,18 @@ describe("mneo edge cases", () => {
       expect(parents).toBe("");
     });
 
-    test("scope collision: forget on 'feat-foo-bar' wipes 'feat/foo-bar' notes", () => {
-      // The branchToScope collision means both branches share the same ref
-      // namespace. forget from one silently deletes the other's note.
+    test("forget on a colliding branch refuses (recovery is explicit scope)", () => {
+      // After collision detection landed, forget() on a colliding auto-scope
+      // refuses up-front instead of silently wiping the peer branch's notes.
+      // The recovery path is forget({ slug, scope: "<explicit>" }).
       checkout(fixture.repo, "feat/foo-bar");
-      record({ repo: fixture.repo, body: "from-slash", slug: "x" });
+      record({ repo: fixture.repo, body: "from-slash", slug: "x", scope: "feat-foo-bar" });
       switchTo(fixture.repo, "main");
       checkout(fixture.repo, "feat-foo-bar");
-      const f = forget({ repo: fixture.repo, slug: "x" });
+      expect(() => forget({ repo: fixture.repo, slug: "x" })).toThrow(/collide/);
+      // Explicit scope still wipes the shared ref — that's the user-acknowledged path.
+      const f = forget({ repo: fixture.repo, slug: "x", scope: "feat-foo-bar" });
       expect(f.deleted).toBe(true);
-      switchTo(fixture.repo, "feat/foo-bar");
-      expect(() => read({ repo: fixture.repo, slug: "x" })).toThrow(/not found/);
     });
   });
 

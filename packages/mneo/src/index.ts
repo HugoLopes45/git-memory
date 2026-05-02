@@ -18,13 +18,20 @@ export {
   InvalidInputError,
   NotFoundError,
   RepoBrokenError,
+  UntrustedError,
 } from "./errors.js";
 
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 
-import { ConflictError, InvalidInputError, NotFoundError, RepoBrokenError } from "./errors.js";
+import {
+  ConflictError,
+  InvalidInputError,
+  NotFoundError,
+  RepoBrokenError,
+  UntrustedError,
+} from "./errors.js";
 
 /** Root namespace for all memory refs. */
 export const REF_ROOT = "refs/agent-memory/";
@@ -44,11 +51,30 @@ export const MAX_SCOPE = 80;
 /** Max headline length in chars (first line of note body). */
 export const HEADLINE_MAX = 80;
 
-/** Default limit for list(). */
+/**
+ * Default limit for list(). Heuristic — chosen as a budget-conscious cap
+ * for the auto-injected hook bundle (~50 × 80-char headlines ≈ 4kB).
+ * Exposed so callers can tune; the surfaced `more` count tells the caller
+ * when the cap silently dropped entries.
+ */
 export const LIST_DEFAULT_LIMIT = 50;
 
-/** Default max age in days for list(). */
+/**
+ * Default max age in days for list(). Heuristic — typical sprint window;
+ * reasonable proxy for "what an agent likely cares about right now."
+ * The surfaced `hidden` count lets callers retry with maxAgeDays:0 to
+ * reach older notes.
+ */
 export const LIST_DEFAULT_MAX_AGE_DAYS = 30;
+
+/**
+ * Skew tolerance for committer timestamps in list(). Commits whose date is
+ * more than this many seconds ahead of `now` are dropped: they could not
+ * have been legitimately created yet, and accepting them lets a malicious
+ * pushed ref pin itself at the top of the list and bypass the maxAgeDays
+ * filter forever. 60s covers honest cross-machine clock skew.
+ */
+export const SKEW_TOLERANCE_SECONDS = 60;
 
 /**
  * Max retries on CAS lock contention.
@@ -119,6 +145,22 @@ function shTry(repo: string, args: readonly string[]): string | null {
   return r.status === 0 ? (r.stdout ?? "").toString().trim() : null;
 }
 
+// Trust gate. Opt-in via MNEO_REQUIRE_SIGNED=1 (or "true"). When set, the
+// SDK refuses to surface notes whose commit doesn't pass `git verify-commit`
+// — defends against the documented push-injection vector when the user has
+// fetched refs from a peer they can't fully trust. The user is responsible
+// for configuring git's signing keys (gpg.format / user.signingkey /
+// gpg.ssh.allowedSignersFile); this helper only asks git the question.
+function requireSigned(): boolean {
+  const v = process.env.MNEO_REQUIRE_SIGNED;
+  return v === "1" || v === "true";
+}
+
+function isSignedCommit(repo: string, sha: string): boolean {
+  const r = spawnSync("git", ["-C", repo, "verify-commit", sha], { encoding: "utf8" });
+  return r.status === 0;
+}
+
 /** Find the git repository root. Respects MNEO_REPO env var. Throws RepoBrokenError if no repo found. */
 export function findRepo(start: string = process.cwd()): string {
   const env = process.env.MNEO_REPO;
@@ -172,7 +214,36 @@ export function currentScope(repo: string): string {
   }
   const branch = shTry(repo, ["rev-parse", "--abbrev-ref", "HEAD"]);
   if (!branch || branch === "HEAD") return TRUNK_SCOPE;
-  return branchToScope(branch);
+  const scope = branchToScope(branch);
+  // branchToScope is lossy: '/' → '-', case folded. Two distinct branches can
+  // collapse to the same scope (e.g. 'feat/foo-bar' and 'feat-foo-bar'),
+  // silently sharing a ref namespace. Bail at the boundary so the LLM gets a
+  // recovery prompt instead of cross-branch reads with no warning. Bypass via
+  // explicit `scope` arg or MNEO_SCOPE (handled above).
+  const peers = shTry(repo, ["for-each-ref", "--format=%(refname:short)", "refs/heads/"]);
+  if (peers) {
+    const collisions: string[] = [];
+    for (const other of peers.split("\n")) {
+      if (!other || other === branch) continue;
+      let otherScope: string;
+      try {
+        otherScope = branchToScope(other);
+      } catch {
+        // Branches outside the scope alphabet ('_', '.', '@', etc.) cannot
+        // produce a valid scope — they are not collision candidates.
+        continue;
+      }
+      if (otherScope === scope) collisions.push(other);
+    }
+    if (collisions.length > 0) {
+      throw new InvalidInputError(
+        `branch '${branch}' normalizes to scope '${scope}' which collides with: ${collisions.join(
+          ", ",
+        )}; set MNEO_SCOPE explicitly or pass an explicit scope to disambiguate`,
+      );
+    }
+  }
+  return scope;
 }
 
 function validateScope(scope: string) {
@@ -238,8 +309,11 @@ export interface RecordResult {
   unchanged: boolean;
 }
 
-/** Save a note. Slug defaults to sha1(body)[:12]. Throws on validation failure or lock exhaustion. */
-export function record(opts: RecordOpts): RecordResult {
+// Generator carrying the shared record() logic. Yields jitter-ms whenever
+// the CAS loop loses a race, so the wrapper decides how to wait — sync via
+// sleepSync (default `record`) or async via setTimeout (`recordAsync`, used
+// by the MCP server to keep the stdio event loop responsive).
+function* recordSteps(opts: RecordOpts): Generator<number, RecordResult, void> {
   if (typeof opts.body !== "string" || opts.body.trim().length === 0) {
     throw new InvalidInputError("body must be a non-empty string");
   }
@@ -285,13 +359,38 @@ export function record(opts: RecordOpts): RecordResult {
       // quoted — non-transient, must NOT be retried.
       if (!/reference already exists|but expected/.test(msg)) throw e;
       // Loser of the race: orphan commit-tree object stays unreachable
-      // until git gc. Sleep with jitter, then retry.
-      sleepSync(1 + Math.floor(Math.random() * RETRY_JITTER_MAX_MS));
+      // until git gc. Yield jitter-ms; wrapper sleeps how it likes.
+      yield 1 + Math.floor(Math.random() * RETRY_JITTER_MAX_MS);
     }
   }
   throw new ConflictError(
     `record: ${scope}/${slug} contended after ${RECORD_MAX_RETRIES} retries — transient lock from concurrent writers; wait briefly and retry, or pass a different slug if you want a separate note`,
   );
+}
+
+/** Save a note. Slug defaults to sha1(body)[:12]. Throws on validation failure or lock exhaustion. */
+export function record(opts: RecordOpts): RecordResult {
+  const it = recordSteps(opts);
+  for (;;) {
+    const step = it.next();
+    if (step.done) return step.value;
+    sleepSync(step.value);
+  }
+}
+
+/**
+ * Async version of `record` — yields the JS event loop between CAS retries
+ * via setTimeout. Use this from any async host (MCP server, web handler)
+ * where blocking the event loop for tens to hundreds of ms is unacceptable.
+ * Identical contract and validation as `record`.
+ */
+export async function recordAsync(opts: RecordOpts): Promise<RecordResult> {
+  const it = recordSteps(opts);
+  for (;;) {
+    const step = it.next();
+    if (step.done) return step.value;
+    await new Promise<void>((r) => setTimeout(r, step.value));
+  }
 }
 
 export interface ListEntry {
@@ -305,6 +404,24 @@ export interface ListResult {
   entries: ListEntry[];
   /** Count of entries dropped by maxAgeDays. Retry with maxAgeDays:0 to surface older notes. */
   hidden: number;
+  /**
+   * Count of entries dropped because their commit signature failed verification.
+   * Only present when MNEO_REQUIRE_SIGNED is set; absent (not 0) when the
+   * trust gate is off, so the trust posture is visible in the result shape.
+   */
+  untrusted?: number;
+  /**
+   * Count of entries dropped because their commit timestamp is implausibly
+   * far in the future (> SKEW_TOLERANCE_SECONDS ahead of now). Defends against
+   * pinning-by-future-date attacks. Present only when > 0.
+   */
+  skewed?: number;
+  /**
+   * Count of entries that satisfied every filter (age, trust, skew) but did
+   * not fit under `limit`. Present only when > 0; signals that the limit
+   * silently truncated data and a higher `limit` would surface more.
+   */
+  more?: number;
 }
 
 export interface ListOpts {
@@ -361,12 +478,19 @@ export function list(opts: ListOpts = {}): ListResult {
   // already puts those first; iteration order = winner). Tied timestamps fall
   // back to refname ASC. Scope-array order is NOT a priority — see
   // edge-cases.test.ts "scope-array order is NOT a priority".
+  // `sha` is carried locally so the trust gate (below) can ask git to
+  // verify-commit without re-resolving the ref.
+  // Skew check happens BEFORE seen.add so a future-dated dup doesn't suppress
+  // a legitimate same-slug entry that comes later in the sort order.
+  const now = Math.floor(Date.now() / 1000);
   const seen = new Set<string>();
-  const entries: ListEntry[] = [];
+  const entries: Array<ListEntry & { sha: string }> = [];
+  let skewed = 0;
   for (const line of out.split("\n")) {
     if (!line) continue;
     const parts = line.split("\t");
     const refname = parts[0] ?? "";
+    const sha = parts[1] ?? "";
     const ts = parts[2] ?? "0";
     const h = sanitizeHeadline(parts.slice(3).join("\t"));
     if (!refname.startsWith(REF_ROOT)) continue;
@@ -378,23 +502,58 @@ export function list(opts: ListOpts = {}): ListResult {
     // When scopes is empty (scope: "all" or []), the for-each-ref glob
     // doesn't constrain by prefix — apply it client-side here.
     if (scopes.length === 0 && prefix && !slug.startsWith(prefix)) continue;
+    const tsNum = Number(ts);
+    if (tsNum > now + SKEW_TOLERANCE_SECONDS) {
+      // Future-dated past honest clock skew: drop. Cannot have legitimately
+      // been written yet; accepting it lets a malicious push pin itself at
+      // the top of list and bypass maxAgeDays forever (now - future < 0
+      // always passes the age check). Don't add to `seen` so a later same-
+      // slug entry with a sane ts is still surfaced.
+      skewed++;
+      continue;
+    }
     if (seen.has(slug)) continue;
     seen.add(slug);
-    entries.push({ slug, scope, h, ts: Number(ts) });
+    entries.push({ slug, scope, h, ts: tsNum, sha });
   }
   // for-each-ref sorts globally; re-sort to keep newest-first after dedup.
   entries.sort((a, b) => b.ts - a.ts);
 
   const maxAgeDays = opts.maxAgeDays ?? LIST_DEFAULT_MAX_AGE_DAYS;
   const filtered =
-    maxAgeDays > 0
-      ? entries.filter((e) => Date.now() / 1000 - e.ts <= maxAgeDays * 86400)
-      : entries;
+    maxAgeDays > 0 ? entries.filter((e) => now - e.ts <= maxAgeDays * 86400) : entries;
   const hidden = entries.length - filtered.length;
 
   const limit = opts.limit ?? LIST_DEFAULT_LIMIT;
-  const capped = limit > 0 ? filtered.slice(0, limit) : filtered;
-  return { entries: capped, hidden };
+  const requireSig = requireSigned();
+  // Verify signatures inline during the slice so the cost is bounded by
+  // `limit` rather than the total ref count. Untrusted entries don't count
+  // toward the limit — the user asked for N signed notes, not N attempts.
+  // `more` records how many filtered entries were not surfaced because the
+  // limit was hit; an over-estimate when the trust gate is on (some of those
+  // remaining might also fail verify), but the binary "there's more" signal
+  // is what callers need.
+  const capped: ListEntry[] = [];
+  let untrusted = 0;
+  let more = 0;
+  for (let i = 0; i < filtered.length; i++) {
+    const e = filtered[i] as ListEntry & { sha: string };
+    if (limit > 0 && capped.length >= limit) {
+      more = filtered.length - i;
+      break;
+    }
+    if (requireSig && !isSignedCommit(repo, e.sha)) {
+      untrusted++;
+      continue;
+    }
+    const { sha: _sha, ...entry } = e;
+    capped.push(entry);
+  }
+  const result: ListResult = { entries: capped, hidden };
+  if (requireSig) result.untrusted = untrusted;
+  if (skewed > 0) result.skewed = skewed;
+  if (more > 0) result.more = more;
+  return result;
 }
 
 export interface ReadOpts {
@@ -423,9 +582,20 @@ export function read(opts: ReadOpts): ReadResult {
       return cur === TRUNK_SCOPE ? [TRUNK_SCOPE] : [cur, TRUNK_SCOPE];
     })();
 
+  const requireSig = requireSigned();
   for (const scope of tryScopes) {
     const ref = refOf(scope, opts.slug);
-    if (!shTry(repo, ["rev-parse", "--verify", "--quiet", ref])) continue;
+    const sha = shTry(repo, ["rev-parse", "--verify", "--quiet", ref]);
+    if (!sha) continue;
+    // Trust gate: when the user opted into MNEO_REQUIRE_SIGNED, a ref that
+    // exists but fails verify-commit is a distinct failure from "not found"
+    // — surface UNTRUSTED so the caller can suggest the right recovery
+    // (configure signing, or unset the env to bypass).
+    if (requireSig && !isSignedCommit(repo, sha)) {
+      throw new UntrustedError(
+        `note ${opts.slug} in scope ${scope} has unverified signature; configure git's signing keys (gpg.format / user.signingkey / gpg.ssh.allowedSignersFile) or unset MNEO_REQUIRE_SIGNED to bypass`,
+      );
+    }
     // Race window: a concurrent forget can delete the ref between rev-parse
     // and show. Re-resolve the ref after a show failure: gone now → race,
     // fall through to next scope; still resolvable → real corruption (bad

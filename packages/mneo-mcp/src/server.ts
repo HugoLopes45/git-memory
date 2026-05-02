@@ -4,7 +4,7 @@
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { MneoError, forget, list, read, record } from "mneo";
+import { MneoError, forget, list, read, recordAsync } from "mneo";
 import { z } from "zod";
 
 /** MCP server name. */
@@ -63,7 +63,7 @@ export function createServer(): McpServer {
     },
     async (args) => {
       try {
-        return ok(record(args));
+        return ok(await recordAsync(args));
       } catch (e) {
         return fail(e);
       }

@@ -9,9 +9,16 @@
  * - INVALID_INPUT   — caller passed something the SDK rejects (bad scope/slug/body)
  * - REPO_BROKEN     — git itself failed (no repo, missing binary, ref corruption)
  * - CONFLICT        — CAS contention exhausted retries
+ * - UNTRUSTED       — ref exists but its commit signature failed verification
+ *                     (only emitted when MNEO_REQUIRE_SIGNED is set)
  */
 
-export type MneoErrorCode = "NOT_FOUND" | "INVALID_INPUT" | "REPO_BROKEN" | "CONFLICT";
+export type MneoErrorCode =
+  | "NOT_FOUND"
+  | "INVALID_INPUT"
+  | "REPO_BROKEN"
+  | "CONFLICT"
+  | "UNTRUSTED";
 
 export class MneoError extends Error {
   readonly code: MneoErrorCode;
@@ -47,5 +54,12 @@ export class ConflictError extends MneoError {
   constructor(message: string) {
     super("CONFLICT", message);
     this.name = "ConflictError";
+  }
+}
+
+export class UntrustedError extends MneoError {
+  constructor(message: string) {
+    super("UNTRUSTED", message);
+    this.name = "UntrustedError";
   }
 }
