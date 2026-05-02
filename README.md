@@ -123,6 +123,8 @@ Note bodies become trusted prompt context for every agent turn. Don't sync `refs
 
 **Opt-in signature gate.** Set `MNEO_REQUIRE_SIGNED=1` to refuse notes whose commit doesn't pass `git verify-commit`. Unsigned entries are dropped from `list` (counted as `untrusted`); `read` throws `UntrustedError`. You configure git's signing keys; mneo asks the question. Recommended whenever you fetch `refs/agent-memory/*` from a remote you don't fully control.
 
+**Always-on framing at the hook boundary.** The SessionStart hook (`mneo context`) wraps the injected bundle in `<mneo-memory>` tags with a directive instructing the model to treat note contents as data rather than instructions. This is defense-in-depth on top of the signature gate — it costs ~95 chars of budget and helps even when signing is off. Programmatic `context()` callers receive raw bullets and are expected to wrap them in their own prompts.
+
 **Treat memory pushes like code pushes.** `refs/agent-memory/*` is not pushed by the default refspec; explicit sync is opt-in. If you wire it, an attacker with write to that remote owns your agent's prompt — unless you've gated reads via `MNEO_REQUIRE_SIGNED`.
 
 ---
