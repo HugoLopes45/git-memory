@@ -55,6 +55,21 @@ Requires Node `>=18` and `git >= 2.31`.
 
 ---
 
+## Use from the shell
+
+For consumers that aren't Node — agents written in bash, Python, Rust, or any language that can spawn a process — the four verbs are exposed as CLI subcommands. JSON output with `--json`, human one-liners by default, exit `1` on `MneoError` (code in payload + on stderr), `2` on usage errors.
+
+```bash
+echo "decision body" | mneo record --slug oauth/flow --json
+mneo list --prefix oauth/ --limit 5 --json
+mneo read --slug oauth/flow --json
+mneo forget --slug oauth/flow --json
+```
+
+`record` accepts the body via `--body "..."` or stdin. `list` supports `--prefix`, `--scope`, `--limit`. All four accept `--scope` to override the auto-detected branch scope.
+
+---
+
 ## Wire it into Claude Code (MCP server + skill)
 
 One command:
