@@ -477,8 +477,8 @@ describe("mneo SDK", () => {
       record({ repo: fixture.repo, body: "x", slug: "a", scope: "side" });
       const f = forget({ repo: fixture.repo, slug: "a", scope: "side" });
       expect(f.deleted).toBe(true);
-      const refs = gitOut(fixture.repo, ["for-each-ref", REF_ROOT]);
-      expect(refs).not.toContain("refs/agent-memory/side/a");
+      // After forget, list does not surface the slug (it's tombstoned, not deleted)
+      expect(list({ repo: fixture.repo, scope: "side" }).entries).toEqual([]);
     });
 
     test("after forget, list no longer surfaces the slug", () => {
@@ -506,10 +506,9 @@ describe("mneo SDK", () => {
         expect(f.scope).toBe("*");
         expect(f.scopes?.sort()).toEqual(["feat", "main", "side"]);
 
-        const refs = gitOut(fixture.repo, ["for-each-ref", "--format=%(refname)", REF_ROOT])
-          .split("\n")
-          .filter(Boolean);
-        expect(refs).toEqual(["refs/agent-memory/main/untouched"]);
+        // After forget, only untouched slug appears in list
+        const entries = list({ repo: fixture.repo, scope: "*" }).entries.map((e) => e.slug);
+        expect(entries).toEqual(["untouched"]);
       });
 
       test("slug doesn't exist anywhere → deleted=false, scopes=[]", () => {
@@ -560,9 +559,10 @@ describe("mneo SDK", () => {
         // success).
         expect(f.scopes?.sort()).toEqual(["feat", "side"]);
 
-        // No refs left for this slug.
-        const refs = gitOut(fixture.repo, ["for-each-ref", "--format=%(refname)", REF_ROOT]);
-        expect(refs).toBe("");
+        // No refs for this slug appear in list (all tombstoned).
+        expect(list({ repo: fixture.repo, scope: "*" }).entries.map((e) => e.slug)).not.toContain(
+          "shared",
+        );
       });
 
       test("a same-slug ref appearing AFTER an interrupted forget is still reachable on rerun", () => {
@@ -575,7 +575,8 @@ describe("mneo SDK", () => {
         record({ repo: fixture.repo, body: "late", slug: "shared", scope: "late" });
         const f = forget({ repo: fixture.repo, slug: "shared", scope: "*" });
         expect(f.deleted).toBe(true);
-        expect(f.scopes).toEqual(["late"]);
+        // Only "late" is in the result because "main" was already tombstoned earlier
+        expect(f.scopes?.sort()).toEqual(["late"]);
       });
 
       test("does not match prefix-similar slugs (exact slug equality only)", () => {
@@ -590,8 +591,8 @@ describe("mneo SDK", () => {
         expect(f.deleted).toBe(true);
         expect(f.scopes).toEqual(["main"]);
         // String-prefix-similar slug is left alone — equality, not prefix.
-        const refs = gitOut(fixture.repo, ["for-each-ref", "--format=%(refname)", REF_ROOT]);
-        expect(refs).toBe("refs/agent-memory/main/auth/oauth-v2");
+        const entries = list({ repo: fixture.repo, scope: "*" }).entries.map((e) => e.slug);
+        expect(entries).toEqual(["auth/oauth-v2"]);
       });
 
       test("nested slug across multiple scopes deletes from each", () => {

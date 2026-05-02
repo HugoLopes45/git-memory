@@ -55,6 +55,21 @@ Requires Node `>=18` and `git >= 2.31`.
 
 ---
 
+## Use from the shell
+
+For consumers that aren't Node — agents written in bash, Python, Rust, or any language that can spawn a process — the four verbs are exposed as CLI subcommands. JSON output with `--json`, human one-liners by default, exit `1` on `MneoError` (code in payload + on stderr), `2` on usage errors.
+
+```bash
+echo "decision body" | mneo record --slug oauth/flow --json
+mneo list --prefix oauth/ --limit 5 --json
+mneo read --slug oauth/flow --json
+mneo forget --slug oauth/flow --json
+```
+
+`record` accepts the body via `--body "..."` or stdin. `list` supports `--prefix`, `--scope`, `--limit`. All four accept `--scope` to override the auto-detected branch scope.
+
+---
+
 ## Wire it into Claude Code (MCP server + skill)
 
 One command:
@@ -122,6 +137,8 @@ Note bodies become trusted prompt context for every agent turn. Don't sync `refs
 **Scope is the trust boundary.** The library does not authenticate writers by default — anyone with write access to `refs/agent-memory/<scope>/*` can plant a note the agent will read on the next session and treat as instructions. Default scope is the auto-normalized current branch; branches with characters outside `[a-z0-9/-]` are rejected at the SDK boundary, and branches that would normalize to the same scope (e.g. `feat/foo-bar` and `feat-foo-bar`) now throw `InvalidInputError` at call time — set `MNEO_SCOPE` explicitly or pass an explicit `scope` to disambiguate.
 
 **Opt-in signature gate.** Set `MNEO_REQUIRE_SIGNED=1` to refuse notes whose commit doesn't pass `git verify-commit`. Unsigned entries are dropped from `list` (counted as `untrusted`); `read` throws `UntrustedError`. You configure git's signing keys; mneo asks the question. Recommended whenever you fetch `refs/agent-memory/*` from a remote you don't fully control.
+
+**Always-on framing at the hook boundary.** The SessionStart hook (`mneo context`) wraps the injected bundle in `<mneo-memory>` tags with a directive instructing the model to treat note contents as data rather than instructions. This is defense-in-depth on top of the signature gate — it costs ~95 chars of budget and helps even when signing is off. Programmatic `context()` callers receive raw bullets and are expected to wrap them in their own prompts.
 
 **Treat memory pushes like code pushes.** `refs/agent-memory/*` is not pushed by the default refspec; explicit sync is opt-in. If you wire it, an attacker with write to that remote owns your agent's prompt — unless you've gated reads via `MNEO_REQUIRE_SIGNED`.
 

@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `MNEO_REQUIRE_SIGNED` env flag (`1` or `true`): opt-in trust gate. When set, `list()` filters notes whose commit fails `git verify-commit` (counted as `untrusted` in the result) and `read()` throws the new `UntrustedError` (`code: "UNTRUSTED"`). Defends against the documented push-injection vector for users fetching `refs/agent-memory/*` from a peer they don't fully control.
 - `SKEW_TOLERANCE_SECONDS` constant (60s) and `ListResult.skewed`: `list()` drops commits dated more than 60s ahead of `now` and surfaces the count. Defends against pinning attacks via `GIT_COMMITTER_DATE=2099` that previously bypassed `maxAgeDays` forever.
 - `ListResult.more`: count of entries that satisfied every filter (age, trust gate, skew) but did not fit under `limit`. Lets callers detect when the default `LIMIT=50` silently truncated their data.
+- CLI subcommands `mneo record | list | read | forget` — thin wrappers over the SDK so non-Node consumers (bash, Python, Rust agents) can shell out without embedding the TS package. `--json` emits a stable JSON shape; absent flag emits a single human line. `MneoError` maps to exit `1` with `{error, message}` on stdout and `code: message` on stderr; usage errors exit `2`. `record` reads the body from `--body` or stdin.
 
 ### Changed
 - README rewritten for clarity and SEO surface (persistent memory, MCP server, vector-database counter-positioning).
