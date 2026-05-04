@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "type": "module",
   "license": "MIT",
-  "description": "Persistent memory for AI agents using git refs. Four verbs (record/list/read/forget), stored as commits on refs/agent-memory/<scope>/<slug>. No vector database, no embeddings, no daemon.",
+  "description": "Persistent memory for AI agents. Five verbs, stored as git refs at refs/agent-memory/<scope>/<slug>. No vector database, no embeddings, no daemon.",
   "keywords": [
     "ai-agents",
     "llm",

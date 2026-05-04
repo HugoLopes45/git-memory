@@ -8,30 +8,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `copy` verb — cross-scope memory transport. `copy({ from, to, slug })` creates a target ref pointing at the same source commit (same sha, body, createdAt); source is preserved. Pass `prefix` for bulk, omit both to copy the whole source scope. Idempotent; single-slug collision throws `CONFLICT`, bulk skips with `reason: 'collision'`. Wired into SDK, CLI, and MCP. Use case: promote a feature-branch decision to `main` after merge without re-recording.
+- CLI subcommands `mneo record | list | read | forget | copy` — thin SDK wrappers for non-Node consumers (bash, Python, Rust). `--json` for machines, human one-liner by default. Exit `1` on `MneoError` (code on stderr), `2` on usage. `record` reads the body via `--body` or stdin.
+- `mneo install` — one-shot wiring of SessionStart hook + `mcpServers.mneo` entry + `.claude/skills/mneo/SKILL.md`. Idempotent on identical content; preserves unrelated keys in `settings.json`. Replaces the previous four-step manual flow.
+- `recordAsync(opts)` SDK export — async sibling of `record()` that yields the JS event loop between CAS retries. `mneo-mcp` switches to it so a contended write no longer freezes the stdio event loop.
+- Typed error contract — `MneoError` base + `NotFoundError`, `InvalidInputError`, `RepoBrokenError`, `ConflictError`, `UntrustedError`, `SyncConflictError`. Each carries a stable `code`. MCP serializes them as `{code, message}` JSON for LLM consumers.
+- `MNEO_REQUIRE_SIGNED=1` opt-in trust gate. `list()` filters notes whose commit fails `git verify-commit` (counted as `untrusted`); `read()` throws `UntrustedError`. Defends the push-injection vector when fetching `refs/agent-memory/*` from peers you don't fully control.
+- Skew defense — `list()` drops commits dated more than `SKEW_TOLERANCE_SECONDS` (60s) ahead of `now`, counted in `ListResult.skewed`. Defends against pinning attacks via future `GIT_COMMITTER_DATE` that previously bypassed `maxAgeDays`.
+- `ListResult.more` — count of entries that survived every filter but did not fit under `limit`. Surfaces silent truncation by the default `LIMIT=50`.
+- Always-on `<mneo-memory>` framing on the SessionStart hook bundle. Notes are wrapped with a directive instructing the model to treat them as data, not instructions. ~95-char overhead; defense-in-depth on top of `MNEO_REQUIRE_SIGNED`.
+- Headline sanitization — control chars (ANSI escapes, BEL, DEL, CR) stripped before headlines reach the caller. A crafted commit subject from a fetched ref can't rewrite terminal output or corrupt JSON consumers.
+- `MANIFESTO.md` — principles and explicit refusals. The boundary that closes feature requests for embeddings, daemons, and domain ontologies.
 - CI workflow (lint + typecheck + test on PR and `main`).
-- `CODE_OF_CONDUCT.md`, `SECURITY.md`, `CHANGELOG.md`.
-- Issue templates (bug, feature) and PR template.
+- `CODE_OF_CONDUCT.md`, `SECURITY.md`, `CHANGELOG.md`, issue templates (bug, feature), PR template.
 - npm metadata (`repository`, `homepage`, `bugs`, `keywords`) on published packages.
-- Typed error contract: `MneoError` base class with `NotFoundError`, `InvalidInputError`, `RepoBrokenError`, `ConflictError` subclasses (each carries a stable `code`). MCP `fail()` now serializes typed errors as `{code, message}` JSON for LLM consumers.
-- `mneo install` subcommand: one-shot wiring of the SessionStart hook, the MCP server entry under `mcpServers.mneo`, and `.claude/skills/mneo/SKILL.md`. Idempotent on identical content; preserves unrelated keys in `settings.json`. Replaces the previous four-step manual flow.
-- `recordAsync(opts)` SDK export: async sibling of `record()` that yields the JS event loop between CAS retries via `setTimeout`. `mneo-mcp` switches to it so a contended write no longer freezes the stdio event loop for up to 200ms.
-- `MNEO_REQUIRE_SIGNED` env flag (`1` or `true`): opt-in trust gate. When set, `list()` filters notes whose commit fails `git verify-commit` (counted as `untrusted` in the result) and `read()` throws the new `UntrustedError` (`code: "UNTRUSTED"`). Defends against the documented push-injection vector for users fetching `refs/agent-memory/*` from a peer they don't fully control.
-- `SKEW_TOLERANCE_SECONDS` constant (60s) and `ListResult.skewed`: `list()` drops commits dated more than 60s ahead of `now` and surfaces the count. Defends against pinning attacks via `GIT_COMMITTER_DATE=2099` that previously bypassed `maxAgeDays` forever.
-- `ListResult.more`: count of entries that satisfied every filter (age, trust gate, skew) but did not fit under `limit`. Lets callers detect when the default `LIMIT=50` silently truncated their data.
-- CLI subcommands `mneo record | list | read | forget` — thin wrappers over the SDK so non-Node consumers (bash, Python, Rust agents) can shell out without embedding the TS package. `--json` emits a stable JSON shape; absent flag emits a single human line. `MneoError` maps to exit `1` with `{error, message}` on stdout and `code: message` on stderr; usage errors exit `2`. `record` reads the body from `--body` or stdin.
 
 ### Changed
-- README rewritten for clarity and SEO surface (persistent memory, MCP server, vector-database counter-positioning).
-- `findRepo` now delegates to git itself (`rev-parse --git-dir` for the env path, `--show-toplevel` for walk-up) — non-repo directories with a stray `HEAD` file no longer false-accept.
-- `branchToScope` validates the normalized form against the scope alphabet and throws `InvalidInputError` with a recovery prompt when the branch can't auto-map (underscore, dot, `@`, etc.). The recovery message names `MNEO_SCOPE` so the LLM has a path forward without renaming the branch.
-- `context()` now degrades gracefully on `RepoBrokenError`: returns `{ text: "" }` so SDK consumers get the same contract the CLI relied on, instead of an unguarded throw.
-- `forget` (single-scope) is now idempotent under race: if the ref is deleted between `rev-parse` and `update-ref -d`, returns `{ deleted: false }` instead of leaking a `git update-ref` error.
-- `record()` refactored to share a `recordSteps()` generator with the new `recordAsync()`; sync semantics unchanged.
-- `list()`'s default `LIMIT=50` and `MAX_AGE_DAYS=30` are now explicitly documented as heuristics in `LIST_DEFAULT_LIMIT` and `LIST_DEFAULT_MAX_AGE_DAYS` JSDoc; the new `more` counter exposes when they bite.
+- README rewritten for the dev evaluator — pain → punch → proof flow, concrete `git show` example up top, five-verb pitch with `copy` included. Removed the long internal-spec "Safeguards" section; those invariants live in JSDoc and `SECURITY.md`.
+- `SKILL.md` tightened for the LLM consumer — human-facing prose removed, the don't-narrate directive sharpened, good/bad `record` examples in a comparison table.
+- `findRepo` delegates to git itself (`rev-parse --git-dir` for the env path, `--show-toplevel` for walk-up). Non-repo directories with a stray `HEAD` file no longer false-accept.
+- `branchToScope` validates the normalized form against the scope alphabet and throws `InvalidInputError` when the branch can't auto-map (underscore, dot, `@`, etc.). Recovery message names `MNEO_SCOPE`.
+- `context()` degrades gracefully on `RepoBrokenError` — returns `{ text: "" }` so SDK consumers get the same contract the CLI relies on, instead of an unguarded throw.
+- `forget` (single-scope) is idempotent under race — if the ref is deleted between `rev-parse` and `update-ref -d`, returns `{ deleted: false }` instead of leaking a `git update-ref` error.
+- `record()` refactored to share a `recordSteps()` generator with `recordAsync()`; sync semantics unchanged.
+- `list()` defaults `LIMIT=50` and `MAX_AGE_DAYS=30` documented as heuristics in `LIST_DEFAULT_LIMIT` / `LIST_DEFAULT_MAX_AGE_DAYS` JSDoc; the new `more` counter exposes when they bite.
 
 ### Breaking
-- `ContextOpts.budget` renamed to `charBudget`. The field measures characters (not tokens, despite the previous JSDoc); the rename makes the contract honest. The CLI flag `--budget` is unchanged for existing hook configs; it's translated at the boundary.
-- `currentScope()` now enumerates `refs/heads/` and throws `InvalidInputError` when another local branch normalizes to the same scope (e.g. `feat/foo-bar` and `feat-foo-bar` both → `feat-foo-bar`). The recovery message names `MNEO_SCOPE`. Replaces the previous silent merge of refs across the colliding branches; callers that relied on the merge must now set `MNEO_SCOPE` or pass an explicit `scope` argument.
+- `ContextOpts.budget` renamed to `charBudget`. The field measures characters, not tokens; the rename makes the contract honest. CLI flag `--budget` unchanged — translated at the boundary.
+- `currentScope()` enumerates `refs/heads/` and throws `InvalidInputError` when another local branch normalizes to the same scope (`feat/foo-bar` and `feat-foo-bar` both → `feat-foo-bar`). Recovery message names `MNEO_SCOPE`. Replaces the previous silent merge across colliding branches; callers that relied on the merge must set `MNEO_SCOPE` or pass an explicit `scope`.
 
 ## [0.1.0] - 2026-04-30
 
