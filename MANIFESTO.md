@@ -6,7 +6,7 @@ Every existing memory solution is too heavy for what they actually need: a few n
 
 ## What mneo is
 
-- A primitive: four verbs — `record`, `list`, `read`, `forget` — plus `push` and `fetch` for sync.
+- A primitive: five verbs — `record`, `list`, `read`, `forget`, `copy` — plus `push` and `fetch` for sync.
 - Storage: `refs/agent-memory/<scope>/<slug>` — git refs, nothing else.
 - A library, a CLI, an MCP server. **The library is the primitive.** CLI and MCP are equal-rank artifacts that wrap it.
 - The consumer is an LLM. Tool descriptions, errors, JSON shapes are written for the model — not for humans browsing docs.
@@ -25,7 +25,7 @@ Every existing memory solution is too heavy for what they actually need: a few n
 3. **The LLM is the consumer.** Tool descriptions teach the discipline. Errors are recovery prompts in one line. JSON is first-class.
 4. **The trust boundary is the scope.** No authentication baked in. Pulled refs from peers are framed as untrusted at session-start. Signed commits are opt-in via `MNEO_REQUIRE_SIGNED`.
 5. **Caveman writes, lazy reads.** Notes are short, atomic, addressable. The LLM scans a TOC of headlines first, reads only what it needs.
-6. **One verb per concept.** `record`, `list`, `read`, `forget`, `push`, `fetch`. No `promote`, no `archive`, no `bookmark`.
+6. **One verb per concept.** `record`, `list`, `read`, `forget`, `copy`, `push`, `fetch`. No `promote`, no `archive`, no `bookmark` — `copy` is the agnostic transport that callers compose into those.
 
 ## Refusals
 

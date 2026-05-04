@@ -700,6 +700,157 @@ export function forget(opts: ForgetOpts): ForgetResult {
   }
 }
 
+export interface CopyOpts {
+  repo?: string | undefined;
+  from: string;
+  to: string;
+  /** Single slug to copy. Mutually exclusive with `prefix`. */
+  slug?: string | undefined;
+  /** Slug prefix filter. Mutually exclusive with `slug`. Empty/undefined = every slug in source. */
+  prefix?: string | undefined;
+}
+
+export interface CopyResult {
+  from: string;
+  to: string;
+  /** Slugs landed at target. `unchanged:true` = target already had the same content. */
+  copied: Array<{ slug: string; sha: string; unchanged: boolean }>;
+  /** Slugs not copied. `collision` = target exists with different content; `tombstoned` = source is a tombstone. */
+  skipped: Array<{ slug: string; reason: "collision" | "tombstoned" }>;
+}
+
+/**
+ * Copy notes from one scope to another. The target ref is created as a new
+ * pointer to the same source commit (same sha, same body, same createdAt) —
+ * the source ref is preserved. Use this to materialise "this decision survives
+ * the merge" without forking the commit object.
+ *
+ * Pass `slug` for one note, `prefix` for a prefix match, neither for the whole
+ * source scope.
+ *
+ * Idempotency: target already pointing to the same content = no-op,
+ * `unchanged:true` in the result row.
+ *
+ * Collision policy: target exists with different content →
+ *   - single-slug op throws ConflictError
+ *   - bulk op (prefix or whole-scope) skips and reports
+ */
+export function copy(opts: CopyOpts): CopyResult {
+  const repo = opts.repo ?? findRepo();
+  if (!opts.from) throw new InvalidInputError("copy: from scope required");
+  if (!opts.to) throw new InvalidInputError("copy: to scope required");
+  validateScope(opts.from);
+  validateScope(opts.to);
+  if (opts.from === opts.to) {
+    throw new InvalidInputError("copy: from and to scopes must differ");
+  }
+  if (opts.slug !== undefined && opts.prefix !== undefined) {
+    throw new InvalidInputError("copy: slug and prefix are mutually exclusive");
+  }
+  if (opts.slug !== undefined) validateSlug(opts.slug);
+  if (
+    opts.prefix !== undefined &&
+    opts.prefix !== "" &&
+    !/^[a-z0-9][a-z0-9\-/]*$/.test(opts.prefix)
+  ) {
+    throw new InvalidInputError(`bad prefix: ${opts.prefix}`);
+  }
+
+  // Discover source refs. Single-slug op throws NotFoundError if missing —
+  // bulk op tolerates an empty result and returns { copied: [], skipped: [] }.
+  let sources: string[];
+  if (opts.slug !== undefined) {
+    const ref = refOf(opts.from, opts.slug);
+    const sha = shTry(repo, ["rev-parse", "--verify", "--quiet", ref]);
+    if (!sha) {
+      throw new NotFoundError(`copy: ${opts.slug} not found in scope ${opts.from}`);
+    }
+    sources = [ref];
+  } else {
+    const prefix = opts.prefix ?? "";
+    const pattern = `${REF_ROOT}${opts.from}/${prefix}`;
+    let out: string;
+    try {
+      out = sh(repo, ["for-each-ref", "--format=%(refname)", pattern]);
+    } catch (e) {
+      throw new RepoBrokenError(`copy: ${e instanceof Error ? e.message : String(e)}`);
+    }
+    sources = out.split("\n").filter(Boolean);
+  }
+
+  const copied: CopyResult["copied"] = [];
+  const skipped: CopyResult["skipped"] = [];
+
+  for (const sourceRef of sources) {
+    const tail = sourceRef.slice(REF_ROOT.length); // <from>/<slug...>
+    const slash = tail.indexOf("/");
+    if (slash < 0) continue;
+    const slug = tail.slice(slash + 1);
+
+    const sourceSha = shTry(repo, ["rev-parse", "--verify", "--quiet", sourceRef]);
+    if (!sourceSha) continue; // race: deleted between for-each-ref and now
+
+    // Skip tombstoned sources: copying a tombstone re-introduces a "deleted"
+    // ghost at target with no useful content. The caller forgets target
+    // explicitly if needed.
+    const sourceBody = shTry(repo, ["show", `${sourceRef}:note.md`]);
+    if (sourceBody === null) continue;
+    if (sourceBody.startsWith(TOMBSTONE_BODY)) {
+      skipped.push({ slug, reason: "tombstoned" });
+      continue;
+    }
+
+    const targetRef = refOf(opts.to, slug);
+    const targetSha = shTry(repo, ["rev-parse", "--verify", "--quiet", targetRef]);
+
+    if (targetSha) {
+      // Compare trees for content-level idempotency. Same tree = same blob =
+      // identical body bytes. Different commits with the same tree (e.g. via
+      // amend) all look idempotent here, which is correct.
+      const sourceTree = shTry(repo, ["rev-parse", `${sourceSha}^{tree}`]);
+      const targetTree = shTry(repo, ["rev-parse", `${targetSha}^{tree}`]);
+      if (sourceTree && sourceTree === targetTree) {
+        copied.push({ slug, sha: targetSha, unchanged: true });
+        continue;
+      }
+      if (opts.slug !== undefined) {
+        throw new ConflictError(
+          `copy: ${opts.to}/${slug} exists with different content; forget the target or pick a different scope`,
+        );
+      }
+      skipped.push({ slug, reason: "collision" });
+      continue;
+    }
+
+    // Atomic create. Empty old-sha forces "must not exist" — race-loser
+    // re-checks tree to distinguish "someone wrote the same thing"
+    // (idempotent) from "someone wrote different content" (collision).
+    try {
+      sh(repo, ["update-ref", targetRef, sourceSha, ""]);
+      copied.push({ slug, sha: sourceSha, unchanged: false });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (!/reference already exists|but expected/.test(msg)) throw e;
+      const newTargetSha = shTry(repo, ["rev-parse", "--verify", "--quiet", targetRef]);
+      if (!newTargetSha) continue;
+      const sourceTree = shTry(repo, ["rev-parse", `${sourceSha}^{tree}`]);
+      const targetTree = shTry(repo, ["rev-parse", `${newTargetSha}^{tree}`]);
+      if (sourceTree && sourceTree === targetTree) {
+        copied.push({ slug, sha: newTargetSha, unchanged: true });
+        continue;
+      }
+      if (opts.slug !== undefined) {
+        throw new ConflictError(
+          `copy: ${opts.to}/${slug} was created by another writer with different content; retry or forget the target`,
+        );
+      }
+      skipped.push({ slug, reason: "collision" });
+    }
+  }
+
+  return { from: opts.from, to: opts.to, copied, skipped };
+}
+
 export interface SyncOpts {
   repo?: string | undefined;
   scope?: string | typeof ALL_SCOPES | undefined;

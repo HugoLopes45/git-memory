@@ -55,10 +55,11 @@ describe("mneo-mcp", () => {
     fixture.cleanup();
   });
 
-  test("exposes 6 tools: record, list, read, forget, push, fetch", async () => {
+  test("exposes 7 tools: record, list, read, forget, copy, push, fetch", async () => {
     await withClient(async (client) => {
       const { tools } = await client.listTools();
       expect(tools.map((t) => t.name).sort()).toEqual([
+        "copy",
         "fetch",
         "forget",
         "list",
@@ -66,6 +67,40 @@ describe("mneo-mcp", () => {
         "read",
         "record",
       ]);
+    });
+  });
+
+  test("copy happy path: feat-x → main, target reads back same body", async () => {
+    await withClient(async (client) => {
+      await client.callTool({
+        name: "record",
+        arguments: { repo: fixture.repo, slug: "n", body: "x", scope: "feat-x" },
+      });
+      const result = unwrap<{
+        from: string;
+        to: string;
+        copied: Array<{ slug: string; sha: string; unchanged: boolean }>;
+        skipped: unknown[];
+      }>(
+        (await client.callTool({
+          name: "copy",
+          arguments: { repo: fixture.repo, from: "feat-x", to: "main", slug: "n" },
+        })) as CallToolResult,
+      );
+      expect(result.from).toBe("feat-x");
+      expect(result.to).toBe("main");
+      expect(result.copied.length).toBe(1);
+      expect(result.copied[0]?.slug).toBe("n");
+      expect(result.copied[0]?.unchanged).toBe(false);
+      expect(result.skipped).toEqual([]);
+
+      const got = unwrap<{ body: string }>(
+        (await client.callTool({
+          name: "read",
+          arguments: { repo: fixture.repo, slug: "n", scope: "main" },
+        })) as CallToolResult,
+      );
+      expect(got.body).toBe("x");
     });
   });
 

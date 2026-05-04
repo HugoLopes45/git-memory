@@ -7,7 +7,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 import { DEFAULT_BUDGET, context } from "./context.js";
-import { MneoError, forget, list, read, record } from "./index.js";
+import { MneoError, copy, forget, list, read, record } from "./index.js";
 import { findProjectDir, installHook, installMcp, installSkill } from "./init-hook.js";
 
 // Boolean flag presence.
@@ -283,8 +283,43 @@ if (sub === "forget") {
   }
 }
 
+if (sub === "copy") {
+  const json = hasFlag(args, "--json");
+  try {
+    const from = getOpt(args, "--from");
+    const to = getOpt(args, "--to");
+    if (from === undefined) throw new UsageError("--from required");
+    if (to === undefined) throw new UsageError("--to required");
+    const slug = getOpt(args, "--slug");
+    const prefix = getOpt(args, "--prefix");
+    const result = copy({ from, to, slug, prefix });
+    if (json) {
+      process.stdout.write(`${JSON.stringify(result)}\n`);
+    } else {
+      process.stdout.write(
+        `copied ${result.copied.length} skipped ${result.skipped.length} (${from} -> ${to})\n`,
+      );
+      for (const c of result.copied) {
+        const tag = c.unchanged ? "=" : "+";
+        process.stdout.write(`  ${tag} ${c.slug} @ ${c.sha.slice(0, 7)}\n`);
+      }
+      for (const s of result.skipped) {
+        process.stdout.write(`  ~ ${s.slug} (${s.reason})\n`);
+      }
+    }
+    process.exit(0);
+  } catch (err) {
+    if (err instanceof UsageError) {
+      process.stderr.write(`${err.message}\n`);
+      process.exit(2);
+    }
+    emitMneoError(err, json);
+    process.exit(1);
+  }
+}
+
 process.stderr.write(`unknown command: ${sub ?? "(none)"}\n`);
 process.stderr.write(
-  "usage: mneo context [--budget N] | init-hook | install | record | list | read | forget\n",
+  "usage: mneo context [--budget N] | init-hook | install | record | list | read | forget | copy\n",
 );
 process.exit(2);
