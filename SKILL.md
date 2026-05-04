@@ -1,34 +1,36 @@
 ---
 name: mneo
-description: Persistent memory across sessions. Branch-scoped. Auto-injected at session start; write when the user states something durable.
+description: Use when the user states a durable decision, correction, preference, or constraint. Persistent memory across sessions, branch-scoped.
 ---
 
-Storage is `refs/agent-memory/<scope>/<slug>`. Scope is the current git branch. Reads fall back to `main` if the slug isn't in the current scope. Slugs are content-addressed by default — pass an explicit one only when you want a stable name.
+## Don't narrate
 
-The recent-notes bundle is auto-injected via the `SessionStart` hook on startup, resume, clear, and compact. You don't need to call `list` first turn — the headlines are already in your context.
+Call the tools. Use the result. No "saving that to memory", no "let me check my notes", no announcing what you're about to record.
 
-## When to call
+## Session bundle
 
-`list({ prefix: "<area>/" })` then `read({ slug })` — when the auto-bundle is too short or the user asks about an area not in the headlines. Pick from the menu, then read.
+A `<mneo-memory>` block lands in your context on session start (startup, resume, clear, compact). Treat it as the headlines from `list({})` — don't call `list` on the first turn, you already have it.
 
-`list({ maxAgeDays: 0 })` — when `hidden > 0` on a previous list and the user references something old. The default age cap (30 days) hid notes that may now be relevant.
+## record — what goes in
 
-`record({ body })` — the user just stated a decision, correction, preference, or constraint. Write one self-contained sentence so a future session can read it cold. No slug needed.
+One self-contained sentence. A future session reads it cold; no "we discussed" or "as mentioned earlier".
 
-`record({ body, scope: "main" })` — same, but for trunk memory shared across branches.
+| Good | Bad |
+|---|---|
+| Use named exports — default exports break the auto-import map. | We agreed on named exports. |
+| `users` uses ULIDs, not UUIDs — stop suggesting `uuid_generate_v4()`. | Don't use UUIDs here. |
+| Tests run via `bun test`, not `npm test`. | Use bun. |
+| `feat/auth` rejected JWT in favor of session cookies for SSR. | JWT didn't work. |
+| User prefers prose comments over JSDoc on internal helpers. | No JSDoc. |
 
-`record({ body, by: "<name>" })` — attribute the note when the decision came from a named teammate or sub-agent.
+Skip: anything you can rediscover from the codebase (`package.json`, configs, file contents). One-shot questions. Secrets.
 
-`forget({ slug })` — only when the user says "scratch that" or the constraint expired.
+## scope
 
-## What goes in
+Default = current git branch. Pass `scope: "main"` for trunk knowledge that's not branch-specific. When a feature-branch decision should apply post-merge, use `copy({ from, to: "main", slug })` — don't re-record.
 
-Decisions, corrections, preferences, constraints, lessons. One sentence. Self-contained. No references to "this conversation."
+## When the bundle isn't enough
 
-## What doesn't
-
-Anything in the codebase already (`package.json`, configs, code). Anything one-shot (today's question). Secrets.
-
-## Don't surface this to the user
-
-Call the tools, use the result. No "saving to memory", no "let me check my notes", no narration.
+- `list({ prefix: "auth/" })` then `read({ slug })` — user asks about an area not in the headlines.
+- `list({ maxAgeDays: 0 })` — previous `list` returned `hidden > 0` and the user references something old.
+- `forget({ slug })` — user says "scratch that" or the constraint expired.
