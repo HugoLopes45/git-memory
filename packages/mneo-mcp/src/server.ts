@@ -4,7 +4,7 @@
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { MneoError, fetch, forget, list, push, read, recordAsync } from "mneo";
+import { MneoError, copy, fetch, forget, list, push, read, recordAsync } from "mneo";
 import { z } from "zod";
 
 /** MCP server name. */
@@ -136,6 +136,38 @@ export function createServer(): McpServer {
     async (args) => {
       try {
         return ok(forget(args));
+      } catch (e) {
+        return fail(e);
+      }
+    },
+  );
+
+  server.registerTool(
+    "copy",
+    {
+      description:
+        "Copy notes from one scope to another. The target ref points at the same commit as the source (same sha, body, createdAt) — source is preserved, not moved. Pass `slug` for one note, `prefix` for a slug-prefix match, or neither to copy the whole source scope. Idempotent: target already has the same content → no-op (`unchanged:true` in the row). Single-slug collision (target exists with different content) throws CONFLICT; bulk op skips and reports `reason:'collision'`.",
+      inputSchema: {
+        from: z.string().min(1).max(80).describe("source scope"),
+        to: z.string().min(1).max(80).describe("destination scope"),
+        slug: z
+          .string()
+          .min(1)
+          .max(80)
+          .optional()
+          .describe("single slug to copy; mutually exclusive with prefix"),
+        prefix: z
+          .string()
+          .optional()
+          .describe(
+            "slug prefix filter; mutually exclusive with slug; empty/omitted = whole source scope",
+          ),
+        repo: z.string().optional(),
+      },
+    },
+    async (args) => {
+      try {
+        return ok(copy(args));
       } catch (e) {
         return fail(e);
       }

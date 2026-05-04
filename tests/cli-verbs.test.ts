@@ -251,3 +251,117 @@ describe("mneo CLI — list / read / forget", () => {
     expect(fg.stdout).toBe(`forgot t2 (scope=${branch})\n`);
   });
 });
+
+describe("mneo CLI — copy", () => {
+  let fixture: TempRepo;
+
+  beforeEach(() => {
+    fixture = makeTempRepo();
+    spawnSync("git", ["-C", fixture.repo, "commit", "--allow-empty", "-m", "init"], {
+      encoding: "utf8",
+    });
+  });
+
+  afterEach(() => {
+    fixture.cleanup();
+  });
+
+  test("--from --to --slug --json → exit 0, copied[1] with sha + unchanged:false", () => {
+    runCli(["record", "--slug", "n", "--body", "x", "--scope", "feat-x", "--json"], {
+      cwd: fixture.repo,
+    });
+    const { code, stdout, stderr } = runCli(
+      ["copy", "--from", "feat-x", "--to", "main", "--slug", "n", "--json"],
+      { cwd: fixture.repo },
+    );
+    expect(code).toBe(0);
+    expect(stderr).toBe("");
+    const parsed = JSON.parse(stdout) as {
+      from: string;
+      to: string;
+      copied: Array<{ slug: string; sha: string; unchanged: boolean }>;
+      skipped: unknown[];
+    };
+    expect(parsed.from).toBe("feat-x");
+    expect(parsed.to).toBe("main");
+    expect(parsed.copied.length).toBe(1);
+    expect(parsed.copied[0]?.slug).toBe("n");
+    expect(parsed.copied[0]?.unchanged).toBe(false);
+    expect(parsed.copied[0]?.sha).toMatch(/^[0-9a-f]{40}$/);
+    expect(parsed.skipped).toEqual([]);
+  });
+
+  test("re-copying same content → unchanged:true", () => {
+    runCli(["record", "--slug", "n", "--body", "x", "--scope", "feat-x", "--json"], {
+      cwd: fixture.repo,
+    });
+    runCli(["copy", "--from", "feat-x", "--to", "main", "--slug", "n", "--json"], {
+      cwd: fixture.repo,
+    });
+    const { code, stdout } = runCli(
+      ["copy", "--from", "feat-x", "--to", "main", "--slug", "n", "--json"],
+      { cwd: fixture.repo },
+    );
+    expect(code).toBe(0);
+    const parsed = JSON.parse(stdout) as { copied: Array<{ unchanged: boolean }> };
+    expect(parsed.copied[0]?.unchanged).toBe(true);
+  });
+
+  test("single-slug collision → exit 1, CONFLICT on stdout JSON + stderr", () => {
+    runCli(["record", "--slug", "n", "--body", "feat", "--scope", "feat-x", "--json"], {
+      cwd: fixture.repo,
+    });
+    runCli(["record", "--slug", "n", "--body", "main", "--scope", "main", "--json"], {
+      cwd: fixture.repo,
+    });
+    const { code, stdout, stderr } = runCli(
+      ["copy", "--from", "feat-x", "--to", "main", "--slug", "n", "--json"],
+      { cwd: fixture.repo },
+    );
+    expect(code).toBe(1);
+    const parsed = JSON.parse(stdout) as { error: string };
+    expect(parsed.error).toBe("CONFLICT");
+    expect(stderr).toMatch(/^CONFLICT:/);
+  });
+
+  test("bulk with --prefix → multiple copied, others untouched", () => {
+    runCli(["record", "--slug", "auth/oauth", "--body", "o", "--scope", "feat-x", "--json"], {
+      cwd: fixture.repo,
+    });
+    runCli(["record", "--slug", "auth/jwt", "--body", "j", "--scope", "feat-x", "--json"], {
+      cwd: fixture.repo,
+    });
+    runCli(["record", "--slug", "db/pg", "--body", "p", "--scope", "feat-x", "--json"], {
+      cwd: fixture.repo,
+    });
+    const { code, stdout } = runCli(
+      ["copy", "--from", "feat-x", "--to", "main", "--prefix", "auth/", "--json"],
+      { cwd: fixture.repo },
+    );
+    expect(code).toBe(0);
+    const parsed = JSON.parse(stdout) as { copied: Array<{ slug: string }> };
+    expect(parsed.copied.map((c) => c.slug).sort()).toEqual(["auth/jwt", "auth/oauth"]);
+  });
+
+  test("missing --from → exit 2, usage error on stderr", () => {
+    const { code, stderr } = runCli(["copy", "--to", "main", "--slug", "x"], {
+      cwd: fixture.repo,
+    });
+    expect(code).toBe(2);
+    expect(stderr).toMatch(/--from required/);
+  });
+
+  test("no --json → human summary line + per-slug rows", () => {
+    runCli(["record", "--slug", "n", "--body", "x", "--scope", "feat-x", "--json"], {
+      cwd: fixture.repo,
+    });
+    const { code, stdout, stderr } = runCli(
+      ["copy", "--from", "feat-x", "--to", "main", "--slug", "n"],
+      { cwd: fixture.repo },
+    );
+    expect(code).toBe(0);
+    expect(stderr).toBe("");
+    expect(stdout).toMatch(/^copied 1 skipped 0 \(feat-x -> main\)\n/);
+    expect(stdout).toMatch(/\n {2}\+ n @ [0-9a-f]{7}\n$/);
+  });
+});

@@ -11,6 +11,7 @@ import {
   LIST_DEFAULT_MAX_AGE_DAYS,
   MAX_BODY,
   REF_ROOT,
+  copy,
   forget,
   list,
   read,
@@ -601,6 +602,115 @@ describe("mneo SDK", () => {
         const f = forget({ repo: fixture.repo, slug: "auth/oauth", scope: "*" });
         expect(f.scopes?.sort()).toEqual(["main", "side"]);
       });
+    });
+  });
+
+  // ─── copy ──────────────────────────────────────────────────────────────
+
+  describe("copy", () => {
+    test("single slug: target ref points at the same commit as source", () => {
+      record({ repo: fixture.repo, body: "decided X", slug: "decision-x", scope: "feat-x" });
+      const r = copy({ repo: fixture.repo, from: "feat-x", to: "main", slug: "decision-x" });
+      expect(r.from).toBe("feat-x");
+      expect(r.to).toBe("main");
+      expect(r.copied).toHaveLength(1);
+      expect(r.copied[0]?.slug).toBe("decision-x");
+      expect(r.copied[0]?.unchanged).toBe(false);
+      expect(r.skipped).toEqual([]);
+      const sourceSha = gitOut(fixture.repo, ["rev-parse", `${REF_ROOT}feat-x/decision-x`]);
+      const targetSha = gitOut(fixture.repo, ["rev-parse", `${REF_ROOT}main/decision-x`]);
+      expect(targetSha).toBe(sourceSha);
+    });
+
+    test("idempotent: re-copying same content → unchanged:true", () => {
+      record({ repo: fixture.repo, body: "x", slug: "n", scope: "feat-x" });
+      copy({ repo: fixture.repo, from: "feat-x", to: "main", slug: "n" });
+      const r = copy({ repo: fixture.repo, from: "feat-x", to: "main", slug: "n" });
+      expect(r.copied[0]?.unchanged).toBe(true);
+    });
+
+    test("single-slug collision (different content) throws CONFLICT", () => {
+      record({ repo: fixture.repo, body: "feat-version", slug: "n", scope: "feat-x" });
+      record({ repo: fixture.repo, body: "main-version", slug: "n", scope: "main" });
+      expect(() => copy({ repo: fixture.repo, from: "feat-x", to: "main", slug: "n" })).toThrow(
+        /exists with different content/,
+      );
+    });
+
+    test("single-slug source not found throws NotFoundError", () => {
+      expect(() => copy({ repo: fixture.repo, from: "feat-x", to: "main", slug: "ghost" })).toThrow(
+        /not found in scope feat-x/,
+      );
+    });
+
+    test("bulk with prefix copies only matching slugs", () => {
+      record({ repo: fixture.repo, body: "o", slug: "auth/oauth", scope: "feat-x" });
+      record({ repo: fixture.repo, body: "j", slug: "auth/jwt", scope: "feat-x" });
+      record({ repo: fixture.repo, body: "p", slug: "db/pg", scope: "feat-x" });
+      const r = copy({ repo: fixture.repo, from: "feat-x", to: "main", prefix: "auth/" });
+      expect(r.copied.map((c) => c.slug).sort()).toEqual(["auth/jwt", "auth/oauth"]);
+      expect(r.skipped).toEqual([]);
+      const targetRefs = gitOut(fixture.repo, [
+        "for-each-ref",
+        "--format=%(refname)",
+        `${REF_ROOT}main/`,
+      ]);
+      expect(targetRefs).not.toContain("main/db/pg");
+    });
+
+    test("bulk without slug or prefix copies the whole source scope", () => {
+      record({ repo: fixture.repo, body: "a", slug: "x", scope: "feat-x" });
+      record({ repo: fixture.repo, body: "b", slug: "y", scope: "feat-x" });
+      const r = copy({ repo: fixture.repo, from: "feat-x", to: "main" });
+      expect(r.copied.map((c) => c.slug).sort()).toEqual(["x", "y"]);
+    });
+
+    test("bulk skips tombstoned source notes", () => {
+      record({ repo: fixture.repo, body: "alive", slug: "n1", scope: "feat-x" });
+      record({ repo: fixture.repo, body: "doomed", slug: "n2", scope: "feat-x" });
+      forget({ repo: fixture.repo, slug: "n2", scope: "feat-x" });
+      const r = copy({ repo: fixture.repo, from: "feat-x", to: "main" });
+      expect(r.copied.map((c) => c.slug)).toEqual(["n1"]);
+      expect(r.skipped.map((s) => s.slug)).toEqual(["n2"]);
+      expect(r.skipped[0]?.reason).toBe("tombstoned");
+    });
+
+    test("bulk collision: target has different content → skip + report, others succeed", () => {
+      record({ repo: fixture.repo, body: "feat-a", slug: "a", scope: "feat-x" });
+      record({ repo: fixture.repo, body: "feat-b", slug: "b", scope: "feat-x" });
+      record({ repo: fixture.repo, body: "main-b-different", slug: "b", scope: "main" });
+      const r = copy({ repo: fixture.repo, from: "feat-x", to: "main" });
+      expect(r.copied.map((c) => c.slug)).toEqual(["a"]);
+      expect(r.skipped).toEqual([{ slug: "b", reason: "collision" }]);
+    });
+
+    test("rejects from === to", () => {
+      expect(() => copy({ repo: fixture.repo, from: "main", to: "main", slug: "x" })).toThrow(
+        /from and to scopes must differ/,
+      );
+    });
+
+    test("rejects slug + prefix together", () => {
+      expect(() =>
+        copy({ repo: fixture.repo, from: "feat-x", to: "main", slug: "a", prefix: "b" }),
+      ).toThrow(/mutually exclusive/);
+    });
+
+    test("rejects bad source/destination/slug/prefix", () => {
+      expect(() => copy({ repo: fixture.repo, from: "Bad", to: "main" })).toThrow(/bad scope/);
+      expect(() => copy({ repo: fixture.repo, from: "main", to: "Bad" })).toThrow(/bad scope/);
+      expect(() =>
+        copy({ repo: fixture.repo, from: "feat-x", to: "main", slug: "Bad slug" }),
+      ).toThrow(/bad slug/);
+      expect(() => copy({ repo: fixture.repo, from: "feat-x", to: "main", prefix: "Bad" })).toThrow(
+        /bad prefix/,
+      );
+    });
+
+    test("empty source scope → returns empty arrays without error", () => {
+      const r = copy({ repo: fixture.repo, from: "ghost-scope", to: "main" });
+      expect(r.copied).toEqual([]);
+      expect(r.skipped).toEqual([]);
     });
   });
 

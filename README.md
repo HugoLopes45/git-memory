@@ -65,10 +65,11 @@ For consumers that aren't Node — agents written in bash, Python, Rust, or any 
 echo "decision body" | mneo record --slug oauth/flow --json
 mneo list --prefix oauth/ --limit 5 --json
 mneo read --slug oauth/flow --json
+mneo copy --from feat-x --to main --slug oauth/flow --json
 mneo forget --slug oauth/flow --json
 ```
 
-`record` accepts the body via `--body "..."` or stdin. `list` supports `--prefix`, `--scope`, `--limit`. All four accept `--scope` to override the auto-detected branch scope.
+`record` accepts the body via `--body "..."` or stdin. `list` supports `--prefix`, `--scope`, `--limit`. All four accept `--scope` to override the auto-detected branch scope. `copy` takes `--from` and `--to` (required), plus either `--slug` (single) or `--prefix` (bulk); omit both to copy the whole source scope.
 
 ---
 
@@ -157,6 +158,7 @@ The SDK enforces the following invariants — no caller setup, no opt-in unless 
 - **Typed errors as recovery prompts.** `MneoError.code` ∈ `{NOT_FOUND, INVALID_INPUT, REPO_BROKEN, CONFLICT, UNTRUSTED, SYNC_CONFLICT}`. Each `message` is one line, action-first — the LLM routes on `code` and reads `message` as its next step.
 - **Scope-collision detection.** Branches that normalize to the same scope (`feat/foo-bar` ↔ `feat-foo-bar`) raise `INVALID_INPUT` at the SDK boundary with a recovery prompt naming `MNEO_SCOPE`. No silent cross-branch reads.
 - **Tombstone forget.** `forget` writes a tombstone commit instead of deleting; `git log refs/agent-memory/<scope>/<slug>` still walks the history. `scope: '*'` removes the slug from every scope, idempotent across partial failures.
+- **Copy is a pointer, not a duplication.** `copy` creates a new ref pointing at the same source commit (same `sha`, body, `createdAt`) — source is preserved, not moved. Idempotent: target already has the same content → `unchanged: true`. Single-slug collision (target exists with different content) throws `CONFLICT`; bulk copy skips the offender and reports `reason: 'collision'` while continuing.
 - **Anti-pinning skew defense.** Commits dated more than 60 s in the future are dropped from `list` (counted as `skewed`). Defends against a peer pinning their note at the top of the menu by setting a future date.
 - **Headline sanitization.** Control chars (ANSI escapes, BEL, DEL, CR) are stripped before headlines reach the caller. A crafted commit subject from a fetched ref can't rewrite terminal output or corrupt JSON consumers.
 - **Untrusted-by-default hook framing.** The SessionStart bundle wraps notes in `<mneo-memory>` tags with a directive instructing the model to treat the content as data, not instructions.
