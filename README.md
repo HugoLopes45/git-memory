@@ -2,6 +2,8 @@
 
 **Persistent memory for AI agents — branches are scopes, git refs are storage.**
 
+> Why mneo exists and what it refuses to be: [MANIFESTO.md](MANIFESTO.md).
+
 Your coding agent forgot what it figured out in `feat/auth` yesterday. You're about to install a vector database, a daemon, and an embedding pipeline to fix it.
 
 Don't. `git` already does this. Branches are scopes. Refs are storage. `push` and `fetch` are sync. Four verbs, zero infrastructure. Ships as an [MCP server](https://modelcontextprotocol.io) for Claude Code, or a TypeScript SDK for any agent.
