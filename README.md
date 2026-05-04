@@ -2,6 +2,8 @@
 
 **Persistent memory for AI agents — branches are scopes, git refs are storage.**
 
+> Why mneo exists and what it refuses to be: [MANIFESTO.md](MANIFESTO.md).
+
 Your coding agent forgot what it figured out in `feat/auth` yesterday. You're about to install a vector database, a daemon, and an embedding pipeline to fix it.
 
 Don't. `git` already does this. Branches are scopes. Refs are storage. `push` and `fetch` are sync. Four verbs, zero infrastructure. Ships as an [MCP server](https://modelcontextprotocol.io) for Claude Code, or a TypeScript SDK for any agent.
@@ -141,6 +143,27 @@ Note bodies become trusted prompt context for every agent turn. Don't sync `refs
 **Always-on framing at the hook boundary.** The SessionStart hook (`mneo context`) wraps the injected bundle in `<mneo-memory>` tags with a directive instructing the model to treat note contents as data rather than instructions. This is defense-in-depth on top of the signature gate — it costs ~95 chars of budget and helps even when signing is off. Programmatic `context()` callers receive raw bullets and are expected to wrap them in their own prompts.
 
 **Treat memory pushes like code pushes.** `refs/agent-memory/*` is not pushed by the default refspec; explicit sync is opt-in. If you wire it, an attacker with write to that remote owns your agent's prompt — unless you've gated reads via `MNEO_REQUIRE_SIGNED`.
+
+---
+
+## Safeguards
+
+The SDK enforces the following invariants — no caller setup, no opt-in unless noted:
+
+- **Idempotent writes.** Same `(scope, slug, body)` returns `{ unchanged: true }` and creates no new commit. Re-recording on retry does not pollute history.
+- **Verification receipt.** Every `record` returns `{ slug, scope, sha, unchanged }`. The agent confirms what landed without a follow-up `read`.
+- **Content-addressed default slug.** `sha1(body)[:12]` — 48 bits of entropy. Same body → same slug, deterministically. No silent duplicates from non-matching headlines.
+- **CAS-protected writes.** Up to 20 retries with 1–10 ms jitter on lock contention. Exhaustion raises `CONFLICT` with a recovery prompt naming the contended ref.
+- **Typed errors as recovery prompts.** `MneoError.code` ∈ `{NOT_FOUND, INVALID_INPUT, REPO_BROKEN, CONFLICT, UNTRUSTED, SYNC_CONFLICT}`. Each `message` is one line, action-first — the LLM routes on `code` and reads `message` as its next step.
+- **Scope-collision detection.** Branches that normalize to the same scope (`feat/foo-bar` ↔ `feat-foo-bar`) raise `INVALID_INPUT` at the SDK boundary with a recovery prompt naming `MNEO_SCOPE`. No silent cross-branch reads.
+- **Tombstone forget.** `forget` writes a tombstone commit instead of deleting; `git log refs/agent-memory/<scope>/<slug>` still walks the history. `scope: '*'` removes the slug from every scope, idempotent across partial failures.
+- **Anti-pinning skew defense.** Commits dated more than 60 s in the future are dropped from `list` (counted as `skewed`). Defends against a peer pinning their note at the top of the menu by setting a future date.
+- **Headline sanitization.** Control chars (ANSI escapes, BEL, DEL, CR) are stripped before headlines reach the caller. A crafted commit subject from a fetched ref can't rewrite terminal output or corrupt JSON consumers.
+- **Untrusted-by-default hook framing.** The SessionStart bundle wraps notes in `<mneo-memory>` tags with a directive instructing the model to treat the content as data, not instructions.
+- **Optional signature gate.** `MNEO_REQUIRE_SIGNED=1` makes `list` filter and `read` reject notes whose commit fails `git verify-commit`. Recommended whenever you fetch `refs/agent-memory/*` from a remote you don't fully control.
+- **Async-safe writes.** `recordAsync` shares the CAS loop with `record` through a generator — same contract, yields between retries instead of blocking the event loop. Used by the MCP server.
+- **Graceful hook degradation.** `mneo context` catches every failure mode (no repo, corrupted refs, missing git binary) and emits an empty bundle. Broken memory never blocks the prompt.
+- **Single-source SDK.** `record`, `list`, `read`, `forget`, `push`, `fetch` live once in the `mneo` package. The CLI imports them. The MCP server (`mneo-mcp`) imports them. CAS, validation, tombstones, sanitization — defined once, reused everywhere.
 
 ---
 
